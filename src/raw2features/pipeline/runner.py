@@ -31,6 +31,7 @@ from raw2features.embedders.fingerprint import (
 )
 from raw2features.embedders.model_registry import build_embedder, resolve_geometry
 from raw2features.patcher.grid import GridPatcher, resample_patch
+from raw2features.patcher.points import PointSampler
 from raw2features.sinks.zarr_sink import ZarrSink, write_patches_geojson
 
 from .receipt import (
@@ -62,6 +63,16 @@ class RunConfig:
     # target_mpp (the extraction scale): this only supplies the missing source
     # calibration so extraction can proceed. None = require it from the metadata.
     source_mpp: float | None = None
+    # Level-0 z-plane spacing (µm/plane) of the SOURCE, for a 3D source whose OME-Zarr
+    # z axis declares no unit. Only used with --points (µm depths). None = read it from
+    # the source metadata (fail loud if the z axis is uncalibrated and points need it).
+    source_z_spacing: float | None = None
+    # Point-cloud path (--points): when set, patches are sampled at these 3D µm points
+    # instead of tissue-grid tiling. Runtime-only (a location); the cloud's *content*
+    # identity is ``points_sha256`` (content-affecting), so two clouds differ in the
+    # hash while the same cloud at a moved path still resumes.
+    points_path: str | None = None
+    points_sha256: str | None = None
     patch_px: int = 224
     step_px: int | None = None
     tissue_threshold: float = 0.1
@@ -128,6 +139,8 @@ class RunConfig:
         "no_seg",
         "target_mpp",
         "source_mpp",
+        "source_z_spacing",
+        "points_sha256",
         "patch_px",
         "step_px",
         "tissue_threshold",
@@ -139,6 +152,7 @@ class RunConfig:
         "amp",
     )
     _RUNTIME_FIELDS: ClassVar[tuple[str, ...]] = (
+        "points_path",
         "device",
         "devices",
         "batch_size",
@@ -184,6 +198,11 @@ class RunConfig:
                 # Absent by default (calibrated sources never set it) -> omit so it does
                 # not perturb the hash of every existing run; only an actual override
                 # (which changes the grid) contributes to the identity.
+                continue
+            elif name in ("source_z_spacing", "points_sha256") and value is None:
+                # 3D/point-sampling knobs are absent for every 2D run -> omit so they
+                # never perturb an existing tissue-grid store's hash; a point-sampled
+                # run sets points_sha256, giving it a distinct content/grid identity.
                 continue
             payload[name] = value
         payload["schema_version"] = SCHEMA_VERSION
@@ -495,6 +514,18 @@ def run_slide(
                     and hasattr(reader, "apply_source_mpp")
                 ):
                     reader.apply_source_mpp(cfg.source_mpp)
+                # An uncalibrated z axis (no z unit) needs an explicit plane spacing to
+                # place µm-depth point clouds; --source-z-spacing supplies it.
+                if (
+                    cfg.source_z_spacing is not None
+                    and hasattr(reader, "apply_source_z_spacing")
+                ):
+                    reader.apply_source_z_spacing(cfg.source_z_spacing)
+                # z_index array for a point-sampled grid (parallel to coords); None
+                # for a regular tissue grid, where every read serves plane 0.
+                zs = None
+                point_source_um = None
+                point_ids = None
                 # Bind each multiplex model's marker panel once (no-op for brightfield),
                 # capturing the kept/dropped-marker summary for the store provenance -
                 # the resolved panel is part of how a multiplex embedding was produced.
@@ -511,6 +542,9 @@ def run_slide(
                         patch_px,
                         level0_patch,
                     ) = _store_geometry(out_path, grid_key_existing)
+                    # Reload the grid's z-planes so a model appended to a point-sampled
+                    # grid reads each patch on the same plane it was built at.
+                    zs = _store_z_index(out_path, grid_key_existing)
                     sink.open_append(
                         out_dir,
                         slide_id,
@@ -520,23 +554,56 @@ def run_slide(
                         replace_models=models_to_do,
                     )
                 else:
-                    patcher = GridPatcher(
-                        target_mpp=cfg.target_mpp,
-                        patch_px=cfg.patch_px,
-                        step_out_px=cfg.step_px,
-                        snap_to_level=cfg.snap_to_level,
-                        mpp_tolerance=cfg.mpp_tolerance,
-                        allow_upsample=cfg.allow_upsample,
-                    )
-                    grid = patcher.build_grid(reader)
-                    with prof.stage("segment"):
-                        tissue, seg_meta = _segment(
-                            reader, cfg, "nuclear" if multiplex else None
+                    sampling_meta = None
+                    grid_index = None
+                    grid_tissue = None
+                    tissue = None
+                    if cfg.points_path:
+                        # 3D point-sampling: read one 2D patch at each µm point of the
+                        # cloud on its z-plane. Tissue segmentation/tiling is bypassed.
+                        sampler = PointSampler(
+                            cfg.points_path,
+                            target_mpp=cfg.target_mpp,
+                            patch_px=cfg.patch_px,
+                            snap_to_level=cfg.snap_to_level,
+                            mpp_tolerance=cfg.mpp_tolerance,
+                            allow_upsample=cfg.allow_upsample,
                         )
-                    with prof.stage("tile"):
-                        coords, grid_index, grid_tissue = patcher.tile(
-                            grid, tissue, cfg.tissue_threshold
+                        grid = sampler.build_grid(reader)
+                        with prof.stage("tile"):
+                            coords, zs, point_source_um, point_ids = sampler.sample(
+                                reader, grid
+                            )
+                        cloud = sampler.load()
+                        seg_meta = {"segmenter": "none"}
+                        sampling_meta = {
+                            "mode": "points",
+                            "source": cloud.source,
+                            "sha256": cloud.sha256,
+                            "units": "um",
+                            "n_points": len(cloud),
+                            "n_kept": int(coords.shape[0]),
+                            "z_scale_um": reader.z_scale_um,
+                            "z_size": reader.z_size(0),
+                        }
+                    else:
+                        patcher = GridPatcher(
+                            target_mpp=cfg.target_mpp,
+                            patch_px=cfg.patch_px,
+                            step_out_px=cfg.step_px,
+                            snap_to_level=cfg.snap_to_level,
+                            mpp_tolerance=cfg.mpp_tolerance,
+                            allow_upsample=cfg.allow_upsample,
                         )
+                        grid = patcher.build_grid(reader)
+                        with prof.stage("segment"):
+                            tissue, seg_meta = _segment(
+                                reader, cfg, "nuclear" if multiplex else None
+                            )
+                        with prof.stage("tile"):
+                            coords, grid_index, grid_tissue = patcher.tile(
+                                grid, tissue, cfg.tissue_threshold
+                            )
                     n = int(coords.shape[0])
                     read_level, read_px, patch_px = (
                         grid.read_level,
@@ -556,6 +623,7 @@ def run_slide(
                         prov,
                         panel_meta,
                         run_contracts,
+                        sampling=sampling_meta,
                     )
                     actual_grid_key = sink.create(
                         out_dir,
@@ -569,6 +637,9 @@ def run_slide(
                         model_dims={e.name: e.embedding_dim for e in run_embedders},
                         header=header,
                         features_dtype=cfg.features_dtype,
+                        z_index=zs,
+                        source_points=point_source_um,
+                        point_ids=point_ids,
                     )
                     if thumbnail_to_do:
                         with prof.stage("thumbnail"):
@@ -639,6 +710,14 @@ def run_slide(
                     normalizer = make_normalizer(
                         cfg.stain_norm, render_thumbnail(reader, max_px=1024).image
                     )
+                if multi_device and zs is not None:
+                    # Point sampling reads a per-patch z-plane; the patch-parallel
+                    # workers don't thread z, so reject it cleanly rather than embed
+                    # the wrong plane. (A single --device handles point clouds.)
+                    raise ValueError(
+                        "point sampling (--points) is not supported on the "
+                        "multi-device path; run with a single --device."
+                    )
                 if multi_device:
                     # Patch-parallel: free the header copy so peak memory is one
                     # model copy per device, then shard coords across devices and
@@ -675,6 +754,7 @@ def run_slide(
                         multichannel=multiplex,
                         normalizer=normalizer,
                         device=devices[0],
+                        zs=zs,
                     )
                 # The array fingerprint is the completion commit marker. Stamp it
                 # only after every row for every model was written successfully.
@@ -1341,13 +1421,14 @@ def _segment(reader, cfg: RunConfig, segmenter_name: str | None = None):
     }
 
 
-def _decode_one(reader, x, y, read_level, read_px, patch_px, multichannel=False):
+def _decode_one(reader, x, y, read_level, read_px, patch_px, multichannel=False, z=0):
     """Read + resample a single patch at the store geometry (one grid cell).
 
     ``multichannel`` (multiplex models) reads every channel natively
     (``read_region_channels`` -> ``[H,W,C]``); otherwise the RGB ``read_region`` path.
+    ``z`` selects the z-plane for a point-sampled 3D patch (0 for a 2D grid).
     """
-    region = Region(read_level, Point(int(x), int(y)), Size(read_px, read_px))
+    region = Region(read_level, Point(int(x), int(y)), Size(read_px, read_px), z=int(z))
     raw = (
         reader.read_region_channels(region)
         if multichannel
@@ -1391,7 +1472,7 @@ def _warn_read_block_memory(reader, cfg, read_px, read_workers, multichannel) ->
 
 
 def _decode_batch(reader, batch, read_level, read_px, patch_px, executor=None,
-                  multichannel=False, read_block=1):
+                  multichannel=False, read_block=1, zs=None):
     """Decode one batch's patch list once at the store geometry (read + resample).
 
     Read read_px px then resample to exactly patch_px -> the stored patch is at the
@@ -1410,23 +1491,32 @@ def _decode_batch(reader, batch, read_level, read_px, patch_px, executor=None,
     ``read_block`` blocks (one larger ``read_region`` per block, patches sliced out in
     memory) -- fewer, larger reads on latency-bound stores. Bit-identical to the
     per-patch path: see :func:`_decode_batch_blocked`.
+
+    ``zs`` (point sampling) gives a per-patch z-plane; each patch then reads its own
+    plane, so the block fast path (which assumes a shared plane) is bypassed.
     """
+    if zs is None:
+        zs = [0] * len(batch)
     if read_block > 1:
-        return _decode_batch_blocked(
-            reader, batch, read_level, read_px, patch_px, executor, multichannel,
-            side=read_block,
-        )
+        # Block reads assume every patch shares plane 0; a per-patch z can't be
+        # grouped, so a point-sampled batch always uses the per-patch path.
+        if not any(zs):
+            return _decode_batch_blocked(
+                reader, batch, read_level, read_px, patch_px, executor, multichannel,
+                side=read_block,
+            )
     if executor is None:
         return [
-            _decode_one(reader, x, y, read_level, read_px, patch_px, multichannel)
-            for x, y in batch
+            _decode_one(reader, x, y, read_level, read_px, patch_px, multichannel, z)
+            for (x, y), z in zip(batch, zs, strict=True)
         ]
     return list(
         executor.map(
-            lambda xy: _decode_one(
-                reader, xy[0], xy[1], read_level, read_px, patch_px, multichannel
+            lambda arg: _decode_one(
+                reader, arg[0][0], arg[0][1], read_level, read_px, patch_px,
+                multichannel, arg[1],
             ),
-            batch,
+            list(zip(batch, zs, strict=True)),
         )
     )
 
@@ -1511,7 +1601,7 @@ def _group_by_transform(embedders: list) -> list[list]:
 
 def _embed_patches(
     reader, coords, read_level, read_px, patch_px, embedders, sink, cfg, prof=None,
-    multichannel=False, normalizer=None, device=None,
+    multichannel=False, normalizer=None, device=None, zs=None,
 ):
     """Decode each patch once at the store geometry and embed it with every
     extractor in *embedders*, writing ``features/<model>`` in batches.
@@ -1560,6 +1650,7 @@ def _embed_patches(
         prof,
         multichannel,
         normalizer,
+        zs,
     )
 
 
@@ -1576,6 +1667,7 @@ def _run_batches(
     prof=None,
     multichannel=False,
     normalizer=None,
+    zs=None,
 ):
     """Core decode -> transform -> embed -> write loop over ``coords`` on ``device``.
 
@@ -1620,10 +1712,13 @@ def _run_batches(
                     if stop.is_set():
                         break
                     batch = coords[start : start + cfg.batch_size]
+                    z_batch = (
+                        zs[start : start + cfg.batch_size] if zs is not None else None
+                    )
                     with prof.stage("read"):
                         patches = _decode_batch(
                             reader, batch, read_level, read_px, patch_px, executor,
-                            multichannel, read_block=cfg.read_block,
+                            multichannel, read_block=cfg.read_block, zs=z_batch,
                         )
                         if normalizer is not None:  # per-patch stain norm (brightfield)
                             patches = [normalizer(p) for p in patches]
@@ -1939,6 +2034,24 @@ def _store_geometry(out_path: str, key: str | None = None):
         int(p["patch_px"]),
         int(p["level0_patch"]),
     )
+
+
+def _store_z_index(out_path: str, key: str | None = None):
+    """Per-patch z-plane of an existing grid, or ``None`` for a 2D (tissue) grid.
+
+    A model added to an existing point-sampled grid must read each patch on the same
+    z-plane the grid was built at, so the append path reloads the stored ``z_index``.
+    """
+    import numpy as np
+    import zarr
+
+    from raw2features.core.store import open_grid
+
+    root = zarr.open_group(out_path, mode="r", use_consolidated=False)
+    g = open_grid(root, key)
+    if "z_index" not in g:
+        return None
+    return np.asarray(g["z_index"][:]).astype(np.int32)
 
 
 def _missing_qc_tools(
@@ -2379,7 +2492,7 @@ def _models_header(
 
 def _build_header(
     reader, grid, seg_meta, embedders, slide_id, n, thumbnail, grid_hash, prov,
-    panel_meta=None, model_contracts=None,
+    panel_meta=None, model_contracts=None, sampling=None,
 ) -> dict:
     header = {
         "schema_version": SCHEMA_VERSION,
@@ -2416,12 +2529,18 @@ def _build_header(
             "level0_patch": grid.level0_patch,
             "level0_step": grid.level0_step,
             "n_patches": n,
-            "grid_shape": [grid.n_rows, grid.n_cols],
-            "coords_convention": "level0_xy",
+            # A point-sampled grid has no regular (rows, cols); grid_shape is null and
+            # coords carry a per-patch z_index / source_points sibling instead.
+            "grid_shape": None if sampling else [grid.n_rows, grid.n_cols],
+            "coords_convention": "level0_xy_z_points" if sampling else "level0_xy",
         },
         "segmentation": seg_meta,
         "models": _models_header(embedders, model_contracts),
     }
+    # Point-sampling provenance: the cloud source + fingerprint, µm units, kept/total
+    # counts, and the z-axis calibration used to place each point on a plane.
+    if sampling:
+        header["sampling"] = sampling
     # Multiplex marker-panel resolution (per model): which of the slide's channels
     # matched the model's marker vocabulary and which were dropped. Absent for
     # brightfield runs. Part of the reproducibility record for a multiplex embedding.

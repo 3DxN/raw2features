@@ -166,6 +166,16 @@ class OmeZarrReader(WSISource):
         self._axis_units: dict[str, str | None] = {}
         self._scale_um: dict[str, float] = {}
         self._level0_translation_um: dict[str, float] | None = None
+        # Z-stack (3D) state. z_size is per-level plane count (1 for a 2D/flat source);
+        # z_scale_um is the level-0 physical plane spacing (µm), or None when the source
+        # declares no z axis / no z unit. z_downsamples/z_off map a level-0 z index to a
+        # read level (identity for the common case where z is not downsampled in the
+        # pyramid); z_trans0_um is the level-0 z origin used to place a physical depth.
+        self._z_size_per_level: list[int] = []
+        self._z_scale_um: float | None = None
+        self._z_downsamples: list[float] = []
+        self._z_off: list[float] = []
+        self._z_trans0_um: float = 0.0
         # Per-level (chunk_h, chunk_w) along the y/x axes, read from the zarr
         # array's own ``.chunks`` (never hard-coded) so the cache keys align with
         # the on-disk chunk grid for whatever layout the store actually uses.
@@ -236,6 +246,7 @@ class OmeZarrReader(WSISource):
         s0 = images[0].scale["x"]
         self._downsamples = [float(im.scale["x"] / s0) for im in images]
         self._build_level_mapping(multiscales["datasets"], xi, yi)
+        self._build_z_mapping(images, multiscales["datasets"], units)
 
         # Plain zarr arrays for the hot read path.
         import zarr
@@ -265,23 +276,22 @@ class OmeZarrReader(WSISource):
         return self
 
     def _warn_plane_collapse(self, level0_shape: tuple[int, ...]) -> None:
-        """Warn if the source has a t or z extent > 1 (only plane 0 is read).
+        """Warn if the source has a t extent > 1 (only t=0 is ever read).
 
-        The reader serves a single 2D (y, x[, c]) plane per patch, indexing any time
-        or depth axis at 0. A multi-timepoint or z-stack source is therefore silently
-        reduced to its first plane - fine if intended, a trap if not - so we surface it
-        once at open rather than embedding plane 0 without a word.
+        The reader serves a single 2D (y, x[, c]) plane per patch. The z (depth) axis
+        is selectable per read (``Region.z`` / point-cloud sampling), so a z-stack is
+        no longer silently collapsed - but the time axis is always read at t=0, so a
+        multi-timepoint source is reduced to its first frame. Surface that once at open
+        rather than embedding t=0 without a word.
         """
-        for axis in ("t", "z"):
-            if axis in self._dims:
-                extent = int(level0_shape[self._dims.index(axis)])
-                if extent > 1:
-                    warnings.warn(
-                        f"{source_uri(self.path)}: source has {axis}={extent}; only "
-                        f"{axis}=0 is "
-                        "read (the reader serves one 2D plane per patch).",
-                        stacklevel=2,
-                    )
+        if "t" in self._dims:
+            extent = int(level0_shape[self._dims.index("t")])
+            if extent > 1:
+                warnings.warn(
+                    f"{source_uri(self.path)}: source has t={extent}; only t=0 is "
+                    "read (the reader serves one 2D plane per patch).",
+                    stacklevel=2,
+                )
 
     def close(self) -> None:
         self._arrays = []
@@ -393,6 +403,45 @@ class OmeZarrReader(WSISource):
             return None
         return dict(self._level0_translation_um)
 
+    # -- z-stack (3D) --------------------------------------------------------
+    def z_size(self, level: int = 0) -> int:
+        """Number of z-planes at ``level`` (``1`` for a 2D/flat source)."""
+        if not self._z_size_per_level:
+            return 1
+        return int(self._z_size_per_level[level])
+
+    @property
+    def z_scale_um(self) -> float | None:
+        """Level-0 physical z-plane spacing in µm, or ``None`` if uncalibrated/2D."""
+        return self._z_scale_um
+
+    def z_index_for_um(self, z_um: float) -> int:
+        """Nearest level-0 z-plane index for a physical depth ``z_um``.
+
+        Requires a calibrated z axis (``z_scale_um`` set); raises otherwise so an
+        uncalibrated stack fails loud rather than silently mapping every point to
+        plane 0. The index is clipped to the level-0 z extent.
+        """
+        if self._z_scale_um is None or self._z_scale_um <= 0:
+            raise ValueError(
+                f"{source_uri(self.path)}: z axis has no physical spacing "
+                "(no z unit declared); cannot map a µm depth to a plane. Pass an "
+                "explicit z-spacing (--source-z-spacing) or fix the source metadata."
+            )
+        idx = int(round((z_um - self._z_trans0_um) / self._z_scale_um))
+        return max(0, min(self.z_size(0) - 1, idx))
+
+    def apply_source_z_spacing(self, z_um: float) -> None:
+        """Set the level-0 z-plane spacing (µm) for a source with uncalibrated z.
+
+        The z analogue of :meth:`apply_source_mpp`: supplies the missing physical
+        spacing so µm-depth point clouds can be placed. Assumes a zero z-origin.
+        """
+        if z_um <= 0:
+            raise ValueError(f"source z-spacing must be positive, got {z_um}")
+        self._z_scale_um = float(z_um)
+        self._z_trans0_um = 0.0
+
     # -- reads ---------------------------------------------------------------
     def read_region(self, region: Region) -> np.ndarray:
         if not self._open:
@@ -404,7 +453,7 @@ class OmeZarrReader(WSISource):
         x0 = int(round(region.location.x / dsx + ox))
         y0 = int(round(region.location.y / dsy + oy))
         w, h = region.size.width, region.size.height
-        return self._read_hwc(arr, region.level, x0, y0, w, h)
+        return self._read_hwc(arr, region.level, x0, y0, w, h, self._z_at_level(region))
 
     def read_region_channels(self, region: Region) -> np.ndarray:
         """Native multi-channel read -> ``(h, w, C)`` in the source dtype.
@@ -422,7 +471,9 @@ class OmeZarrReader(WSISource):
         x0 = int(round(region.location.x / dsx + ox))
         y0 = int(round(region.location.y / dsy + oy))
         w, h = region.size.width, region.size.height
-        block, sliced = self._read_block_cached(arr, region.level, x0, y0, w, h)
+        block, sliced = self._read_block_cached(
+            arr, region.level, x0, y0, w, h, self._z_at_level(region)
+        )
         target = ["y", "x"] + (["c"] if "c" in sliced else [])
         block = np.transpose(block, [sliced.index(t) for t in target])
         if "c" not in sliced:
@@ -450,7 +501,7 @@ class OmeZarrReader(WSISource):
 
     # -- internals -----------------------------------------------------------
     def _read_hwc(
-        self, arr: object, level: int, x0: int, y0: int, w: int, h: int
+        self, arr: object, level: int, x0: int, y0: int, w: int, h: int, z: int = 0
     ) -> np.ndarray:
         """Slice a 2-5D level array and normalise to (h, w, 3) uint8.
 
@@ -458,9 +509,10 @@ class OmeZarrReader(WSISource):
         ``_read_block_cached``) so adjacent/overlapping patches reuse already-
         decompressed 512x512 chunks instead of re-decompressing them. The
         assembled block is byte-identical to a direct ``arr[...]`` multi-chunk
-        slice - only the decompression is shared.
+        slice - only the decompression is shared. ``z`` selects the z-plane
+        (read-level index) for a 3D source; ignored when there is no z axis.
         """
-        block, sliced = self._read_block_cached(arr, level, x0, y0, w, h)
+        block, sliced = self._read_block_cached(arr, level, x0, y0, w, h, z)
 
         # Reorder remaining axes to (y, x, c).
         target = ["y", "x"] + (["c"] if "c" in sliced else [])
@@ -491,13 +543,15 @@ class OmeZarrReader(WSISource):
         return np.ascontiguousarray(block)
 
     def _read_block_cached(
-        self, arr: object, level: int, x0: int, y0: int, w: int, h: int
+        self, arr: object, level: int, x0: int, y0: int, w: int, h: int, z: int = 0
     ) -> tuple[np.ndarray, list[str]]:
         """Assemble the (y, x[, c]) window from cached decompressed chunk planes.
 
         Returns ``(block, sliced)`` where ``block`` is byte-identical to a direct
-        ``arr[t0, :, z0, y0:y0+h, x0:x0+w]`` slice (scalar t/z axes dropped, axes in
-        ``self._dims`` order) and ``sliced`` lists the surviving non-scalar dims.
+        ``arr[t0, :, z, y0:y0+h, x0:x0+w]`` slice (scalar t axis and the chosen z
+        plane dropped, axes in ``self._dims`` order) and ``sliced`` lists the
+        surviving non-scalar dims. ``z`` is the read-level z-plane index (0 for a
+        2D source).
 
         The window is built by copying from per-(channel, chunk_y, chunk_x) planes
         pulled from ``self._chunk_cache``; a miss decompresses exactly one chunk via
@@ -543,7 +597,7 @@ class OmeZarrReader(WSISource):
                 cy_lo, cy_hi = cy * ch, min((cy + 1) * ch, level_h)
                 for cx in range(cx0, cx1 + 1):
                     cx_lo, cx_hi = cx * cw, min((cx + 1) * cw, level_w)
-                    key = (level, c_val, cy, cx)
+                    key = (level, z, c_val, cy, cx)
                     plane = self._chunk_cache.get_or_read(
                         key,
                         partial(
@@ -554,6 +608,7 @@ class OmeZarrReader(WSISource):
                             cy_hi,
                             cx_lo,
                             cx_hi,
+                            z,
                         ),
                     )
                     # Intersection of this chunk with the requested window.
@@ -568,13 +623,15 @@ class OmeZarrReader(WSISource):
         return block, sliced
 
     def _read_chunk_plane(
-        self, arr: object, c_val: int | None, ys: int, ye: int, xs: int, xe: int
+        self, arr: object, c_val: int | None, ys: int, ye: int, xs: int, xe: int,
+        z: int = 0,
     ) -> np.ndarray:
         """Decompress one chunk-aligned (y, x) plane for a single channel.
 
-        Builds a full index over ``self._dims`` (scalar axes -> 0, the c axis -> the
-        single channel ``c_val``, y/x -> the chunk's bounds) so the result is a 2D
-        ``(y, x)`` array, exactly the chunk's pixels the multi-chunk slice would use.
+        Builds a full index over ``self._dims`` (the z axis -> plane ``z``, other
+        non-spatial axes -> 0, the c axis -> the single channel ``c_val``, y/x -> the
+        chunk's bounds) so the result is a 2D ``(y, x)`` array, exactly the chunk's
+        pixels the multi-chunk slice would use.
         """
         idx: list[object] = []
         for d in self._dims:
@@ -584,6 +641,8 @@ class OmeZarrReader(WSISource):
                 idx.append(slice(xs, xe))
             elif d == "c":
                 idx.append(c_val)
+            elif d == "z":
+                idx.append(z)
             else:
                 idx.append(0)
         return np.asarray(arr[tuple(idx)])  # type: ignore[index]
@@ -730,6 +789,71 @@ class OmeZarrReader(WSISource):
             self._downsamples_y = list(self._downsamples)
             self._level_off_x = [0.0] * n
             self._level_off_y = [0.0] * n
+
+    def _build_z_mapping(self, images: list, datasets: list, units: dict) -> None:
+        """Per-level z extent + downsample/translation, and the level-0 z µm spacing.
+
+        A 2D or flat (z-size-1) source leaves ``z_scale_um`` as ``None`` and every
+        z index at 0. When a z axis exists: ``z_size`` per level comes from each
+        array's z shape; the z downsample ratio and translation offset are read from
+        the ``coordinateTransformations`` (like x/y in ``_build_level_mapping``), so a
+        level-0 z index maps to a read level as ``round(z / z_downsample + z_off)`` -
+        identity for the common pyramid where z is not downsampled. ``z_scale_um`` is
+        the level-0 z scale converted to µm (``None`` when the z axis has no unit).
+        """
+        n = len(self._downsamples)
+        if "z" not in self._dims:
+            self._z_size_per_level = [1] * n
+            self._z_downsamples = [1.0] * n
+            self._z_off = [0.0] * n
+            self._z_scale_um = None
+            self._z_trans0_um = 0.0
+            return
+        zi = self._dims.index("z")
+        self._z_size_per_level = [int(im.data.shape[zi]) for im in images]
+        sz, tz = [], []
+        for d in datasets:
+            s = None
+            tzi = 0.0
+            for tr in d.get("coordinateTransformations") or []:
+                if tr.get("type") == "scale":
+                    vec = tr.get("scale") or []
+                    s = float(vec[zi]) if zi < len(vec) else None
+                elif tr.get("type") == "translation":
+                    vec = tr.get("translation") or []
+                    tzi = float(vec[zi]) if zi < len(vec) else 0.0
+            sz.append(s)
+            tz.append(tzi)
+        have = len(sz) == n and all(v and v > 0 for v in sz)
+        if have:
+            self._z_downsamples = [v / sz[0] for v in sz]
+            self._z_off = [(tz[0] - t) / s for t, s in zip(tz, sz, strict=True)]
+        else:
+            self._z_downsamples = [1.0] * n
+            self._z_off = [0.0] * n
+        z_unit = units.get("z")
+        # A z scale is only physical (µm) when the z axis declares a unit; otherwise it
+        # is arbitrary and we keep z_scale_um None (callers then need it explicitly).
+        if z_unit is not None and have:
+            self._z_scale_um = self._to_um(images[0].scale["z"], z_unit)
+            self._z_trans0_um = self._to_um(tz[0], z_unit) if tz else 0.0
+        else:
+            self._z_scale_um = None
+            self._z_trans0_um = 0.0
+
+    def _z_at_level(self, region: Region) -> int:
+        """Map a level-0 z-plane index (``region.z``) to ``region.level``'s z index.
+
+        Identity for the common pyramid where z is not downsampled. Clipped to the
+        level's z extent so a border/rounding overshoot stays in-bounds.
+        """
+        level = region.level
+        if not self._z_size_per_level or self._z_size_per_level[level] <= 1:
+            return 0
+        ds = self._z_downsamples[level] if self._z_downsamples else 1.0
+        off = self._z_off[level] if self._z_off else 0.0
+        idx = int(round(region.z / ds + off))
+        return max(0, min(self._z_size_per_level[level] - 1, idx))
 
     def _read_level0_translation_um(
         self, multiscales: dict, units: dict

@@ -204,6 +204,26 @@ def _validate_grid(g, header: dict) -> list[str]:
             )
         if dict(g["mask"].attrs).get("role") != "tissue_mask":
             out.append("mask must carry attr role='tissue_mask'")
+    # 3D point-sampling siblings (present only for a point-sampled grid), each 1:1 with
+    # coords: z_index (N,) plane index, source_points (N, 3) µm centers, point_ids (N,).
+    if "z_index" in g:
+        if n is not None and tuple(g["z_index"].shape) != (n,):
+            out.append(f"z_index must be (N,)=({n},), got {tuple(g['z_index'].shape)}")
+        if dict(g["z_index"].attrs).get("role") != "z_index":
+            out.append("z_index must carry attr role='z_index'")
+    if "source_points" in g:
+        if n is not None and tuple(g["source_points"].shape) != (n, 3):
+            got = tuple(g["source_points"].shape)
+            out.append(f"source_points must be (N, 3)=({n}, 3), got {got}")
+        if dict(g["source_points"].attrs).get("role") != "source_points":
+            out.append("source_points must carry attr role='source_points'")
+    if "point_ids" in g:
+        if n is not None and int(g["point_ids"].shape[0]) != n:
+            out.append(
+                f"point_ids length {g['point_ids'].shape[0]} != coords length {n}"
+            )
+        if dict(g["point_ids"].attrs).get("role") != "point_id":
+            out.append("point_ids must carry attr role='point_id'")
     if "slide" in g:
         from raw2features.embedders.fingerprint import (
             output_fingerprints_equal,

@@ -78,7 +78,25 @@ class WSISource(ABC):
 
     @abstractmethod
     def read_region(self, region: Region) -> np.ndarray:
-        """Read ``region``; return an HWC uint8 RGB ndarray of ``region.size``."""
+        """Read ``region``; return an HWC uint8 RGB ndarray of ``region.size``.
+
+        ``region.z`` selects the z-plane for a 3D source (default 0). A 2D reader
+        ignores it and always serves its single plane.
+        """
+
+    # -- z-stack (3D) introspection (optional; 2D readers use the defaults) --
+    def z_size(self, level: int = 0) -> int:
+        """Number of z-planes at ``level`` (``1`` for a 2D source)."""
+        return 1
+
+    @property
+    def z_scale_um(self) -> float | None:
+        """Physical spacing between z-planes in µm, or ``None`` if uncalibrated/2D."""
+        return None
+
+    def z_index_for_um(self, z_um: float) -> int:
+        """Nearest z-plane index for a physical depth ``z_um`` (0 for a 2D source)."""
+        return 0
 
     # -- multi-channel / multiplex (optional; brightfield readers need not) --
     @property

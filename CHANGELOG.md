@@ -3,6 +3,20 @@
 Notable changes to raw2features, newest first. This project follows
 [Semantic Versioning](https://semver.org).
 
+## Unreleased
+
+### Added
+
+- **3D point-cloud sampling** for z-stack OME-Zarr sources. Pass `raw2features embed
+  --points FILE` (a CSV/Parquet of `x,y,z` in µm, plus an optional `id`) to sample one 2D
+  patch per point on its nearest z-plane and embed it with any existing 2D model, instead of
+  tissue-grid tiling. The reader now serves any z-plane (`Region.z`), and each grid gains 1:1
+  `z_index` / `source_points` (and optional `point_ids`) sibling arrays plus a `sampling`
+  header block (`coords_convention: "level0_xy_z_points"`); `coords` stay level-0 `(x, y)`, so
+  2D consumers are unaffected. Add `--source-z-spacing` when the z axis is uncalibrated;
+  `raw2features sample --z N` writes a synthetic z-stack to try it offline. See
+  [`docs/SPEC.md`](docs/SPEC.md#3d-point-sampled-grids) and `docs/usage.md`.
+
 ## [0.1.0] - 2026-06-30
 
 First public release.

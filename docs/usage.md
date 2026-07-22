@@ -141,6 +141,8 @@ Any token passed on the command line is redacted from stored command provenance.
 | `--no-seg` | off | tile the whole slide (skip tissue masking) |
 | `--segmenter` | `otsu` | tissue segmenter to use |
 | `--tissue-threshold` | `0.1` | keep a grid cell if ≥ this fraction is tissue |
+| `--points FILE` | none | **3D point sampling**: CSV/Parquet of `x,y,z` (µm, + optional `id`). Samples one 2D patch per point on its z-plane instead of tissue tiling (segmentation ignored). Output gains `z_index`/`source_points` siblings. See _3D point sampling_ below. |
+| `--source-z-spacing` | from metadata | z-plane spacing (µm/plane) for a z-stack whose z axis declares no unit (the z analogue of `--source-mpp`); only needed with `--points` |
 | `--features-dtype` | `float16` | stored feature dtype |
 | `--stain-norm` | off | stain-normalize each patch before embedding (`macenko`\|`reinhard`\|`vahadane`; `vahadane` needs `raw2features[stain]`); **changes the features** - use separate output dirs for with/without-norm experiments |
 | `--config FILE` | none | YAML extraction plan (`extractions:` list of `{model, mpp?, patch_px?}`); supersedes `-m`/`--mpp`/`--patch-size`. The same model may repeat (one grid each - the MPP-ablation case) |
@@ -219,6 +221,30 @@ if its tissue fraction ≥ `--tissue-threshold`. `--no-seg` tiles the whole slid
 (and omits the `mask` array). Other segmenters (incl. the opt-in deep `grandqc`)
 are pluggable via the `segmenters` seam - see
 [`SEGMENTATION.md`](SEGMENTATION.md) for the methods and the GrandQC QC layer.
+
+### 3D point sampling (`--points`, opt-in)
+
+For a **3D OME-Zarr (z-stack)** you can sample patches at explicit 3D coordinates
+instead of tiling. Pass `--points FILE` - a CSV or Parquet table with columns
+`x, y, z` in **physical µm** (plus an optional `id`/`label`) - and raw2features reads
+**one 2D patch per point** at the point's `(x, y)` on its nearest z-plane, at the
+requested `--mpp`, and embeds it with any of the usual 2D models:
+
+```bash
+raw2features sample sample.ome.zarr --z 8            # a synthetic 8-plane z-stack
+raw2features embed  sample.ome.zarr out/ -m uni -m virchow2 --points points.csv
+```
+
+Tissue segmentation and tiling are bypassed (the points **are** the selection, so
+`--segmenter`/`--no-seg`/`--tissue-threshold` are ignored). The store's `coords`
+stay level-0 `(x, y)` top-left, and each grid gains 1:1 `z_index` (the plane read)
+and `source_points` (the source µm `(x, y, z)` center) arrays plus a `sampling`
+header block; a 2D reader ignores them, a 3D reader uses them to relocate a patch in
+the source's physical frame (see [`SPEC.md`](SPEC.md#3d-point-sampled-grids)).
+Coordinates are µm, so the source must be calibrated: if its x/y (or z) axis declares
+no unit, supply `--source-mpp` (and `--source-z-spacing`). Multi-model fan-out,
+resume, and appending a model all work as for a tissue grid; `--devices` multi-GPU is
+not supported for point sampling (use a single `--device`).
 
 ### Multi-model fan-out (decode-once)
 
