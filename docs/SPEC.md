@@ -57,8 +57,11 @@ Tree:
     └── <key>/                               # e.g. mpp0.5_px224 - one geometry (mpp, patch_px)
         ├── (group attrs)["raw2features"]    # this grid's complete header - see below
         ├── coords          (N, 2) int32     # required - level-0 (x, y) top-left of each patch
-        ├── grid_index      (N, 2) int32     # optional - (row, col) of each patch in the grid
+        ├── grid_index      (N, 2) int32     # optional - (row, col) of each patch in the grid (tissue grid only)
         ├── mask        (rows, cols) uint8   # optional - fraction of each cell that is tissue; /255 for [0,1]
+        ├── z_index         (N,)    int32    # optional - per-patch z-plane index (3D point sampling)
+        ├── source_points   (N, 3)  float64  # optional - source µm (x, y, z) center of each patch (point sampling)
+        ├── point_ids       (N,)    str      # optional - caller-supplied point id per patch (point sampling)
         ├── features/                        # required group
         │   ├── <model>     (N, dim) f16     # one array per model; 1:1 with this grid's coords
         │   └── ...
@@ -71,7 +74,8 @@ A **grid key** is a human-readable label `mpp{mpp}_px{patch_px}` (e.g. `mpp0.5_p
 addressable handle. Most stores have a single grid; a store grows a second grid when a model
 with a different recommended geometry is requested (e.g. CONCH at 0.5/448 alongside UNI at
 0.5/224), or the same model is extracted at several scales. Every array carries a `role`
-attribute (`coords`, `grid_index`, `tissue_mask`, `features`, `slide_embedding`, `qc`).
+attribute (`coords`, `grid_index`, `tissue_mask`, `z_index`, `source_points`, `point_id`,
+`features`, `slide_embedding`, `qc`).
 `coords` carries `units = "level0_px"`; each `features` array carries `model = <name>`.
 
 ### The 1:1 invariant
@@ -96,8 +100,11 @@ Under each `grids/<key>/`:
 
 | Array | Shape | Dtype | Meaning |
 |---|---|---|---|
-| `grid_index` | (N, 2) | int32 | `(row, col)` of each patch in the regular grid. |
+| `grid_index` | (N, 2) | int32 | `(row, col)` of each patch in the regular grid. Absent for a point-sampled grid (no regular rows/cols). |
 | `mask` | (rows, cols) | uint8 | Fraction of each grid cell that is tissue (the mean of the segmentation mask over the cell), stored as `0-255` - divide by 255 for the `[0,1]` value. Index a kept patch's cell via `grid_index[i]`. Absent when tiling without segmentation. |
+| `z_index` | (N,) | int32 | Per-patch z-plane (depth) index read for the patch. Present for **3D point-sampled** grids (`coords_convention = "level0_xy_z_points"`), 1:1 with `coords`. |
+| `source_points` | (N, 3) | float64 | The source physical `(x, y, z)` in µm the patch was sampled at (the point's center; `role = "source_points"`, `units = "um"`). Lets a consumer relocate a patch in the source's 3D physical frame. Point sampling only. |
+| `point_ids` | (N,) | str | Caller-supplied id/label per point (`role = "point_id"`), when the input cloud carried one. Point sampling only. |
 | `slide/<model>` | (1, dim) | float32 | A slide-level vector (e.g. from a slide encoder or pooling), derived from this grid's features. |
 
 ## Optional QC layer (per grid)
@@ -155,7 +162,13 @@ A JSON object; the normative definition is the packaged JSON Schema (see
   frame (see [Coordinates](#coordinates--relocatability)).
 - `patching` - **this grid's** geometry: `target_mpp`, `achieved_mpp`, `patch_px`,
   `level0_patch` (patch side in level-0 px), `level0_step`, `read_level`, `step_out_px`,
-  `n_patches`, `grid_shape` (`[rows, cols]`), `coords_convention` (`"level0_xy"`).
+  `n_patches`, `grid_shape` (`[rows, cols]`, or `null` for a point-sampled grid),
+  `coords_convention` (`"level0_xy"` for a tissue grid; `"level0_xy_z_points"` for a
+  3D point-sampled grid, whose per-patch depth lives in the `z_index` / `source_points`
+  siblings).
+- `sampling` - present only for a **3D point-sampled** grid (`--points`): `{ mode:
+  "points", source, sha256, units: "um", n_points, n_kept, z_scale_um, z_size }` - the
+  point-cloud provenance and the z-axis calibration used to place each point on a plane.
 - `models` - map of model name → `{ source, embedding_dim, input_size, pooling, mean,
   std, interpolation, license, gated, experimental, weights_sha256, weights_revision,
   weights_filename, transform_source_url, inference_amp, doi, output_fingerprint }`
@@ -226,6 +239,17 @@ preserving everything needed to relocate into physical space.
 Together with `source.uri` (and any stable identifier it carries - a DOI, archive
 accession, or checksum), this makes the store relocatable to its source even when that
 source is remote or read-only.
+
+### 3D (point-sampled) grids
+
+A grid built by 3D point-cloud sampling (`--points`, `coords_convention =
+"level0_xy_z_points"`) keeps `coords` as level-0 `(x, y)` top-left exactly as above, and
+adds the **depth** each patch was read at: `z_index[i]` is the source z-plane and
+`source_points[i]` is the original `(x, y, z)` µm center of the point. A 2D consumer can
+ignore the siblings and read `coords`/`features` unchanged; a 3D consumer combines
+`source_points` (µm) - or `coords` plus `z_index` scaled by `sampling.z_scale_um` - to
+relocate the patch in the source's 3D physical frame. The patches are the caller's points,
+not a tissue grid, so `grid_index`/`mask` are absent and `grid_shape` is `null`.
 
 > The coordinate frame is described with plain **values** (axes, units, per-axis scale,
 > translation) rather than an NGFF `coordinateTransformations` object. The community's

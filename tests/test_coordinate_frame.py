@@ -157,17 +157,20 @@ def test_apply_source_mpp_lets_an_uncalibrated_source_proceed(tmp_path):
             r.apply_source_mpp(0.0)
 
 
-def test_plane_collapse_warns_on_t_or_z_stack(synthetic_ngff):
-    # dims are (t, c, z, y, x); a >1 extent on t or z means only plane 0 is read.
+def test_plane_collapse_warns_on_t_stack_not_z(synthetic_ngff):
+    # dims are (t, c, z, y, x). The z axis is now selectable per read (Region.z /
+    # point-cloud sampling), so a z-stack no longer warns; only a >1 time extent does
+    # (t is always read at 0).
     with OmeZarrReader(synthetic_ngff) as r:
-        for shape, token in (
-            ((2, 3, 1, 300, 200), "t=2"),
-            ((1, 3, 4, 300, 200), "z=4"),
-        ):
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter("always")
-                r._warn_plane_collapse(shape)
-            assert any(token in str(w.message) for w in caught)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            r._warn_plane_collapse((2, 3, 1, 300, 200))
+        assert any("t=2" in str(w.message) for w in caught)
+        # A z-stack must NOT warn - its planes are addressable.
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            r._warn_plane_collapse((1, 3, 4, 300, 200))
+        assert not caught
         # A single-plane source (the common case) must not warn.
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")

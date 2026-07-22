@@ -56,8 +56,8 @@
         "read_level": { "type": "integer" },
         "step_out_px": { "type": "integer" },
         "n_patches": { "type": "integer" },
-        "grid_shape": { "type": "array", "items": { "type": "integer" }, "minItems": 2, "maxItems": 2 },
-        "coords_convention": { "const": "level0_xy" }
+        "grid_shape": { "type": ["array", "null"], "items": { "type": "integer" }, "minItems": 2, "maxItems": 2, "description": "[rows, cols] for a regular tissue grid; null for a point-sampled grid (no regular rows/cols)." },
+        "coords_convention": { "enum": ["level0_xy", "level0_xy_z_points"], "description": "level0_xy: coords are level-0 (x,y) top-left. level0_xy_z_points: 3D point sampling - coords carry a per-patch z_index / source_points sibling array." }
       }
     },
     "models": {
@@ -105,6 +105,21 @@
     "segmentation": { "type": ["object", "null"] },
     "thumbnail": { "type": ["object", "null"] },
     "panel": { "type": "object", "description": "Optional: per-model multiplex marker-panel resolution (kept/dropped markers)." },
-    "qc": { "type": "object", "description": "Optional: per-tool QC provenance for this grid's qc/<tool>/ arrays (tool, version, mpp, class legend, threshold). The arrays are checked by validate-store, not this schema." }
+    "qc": { "type": "object", "description": "Optional: per-tool QC provenance for this grid's qc/<tool>/ arrays (tool, version, mpp, class legend, threshold). The arrays are checked by validate-store, not this schema." },
+    "sampling": {
+      "type": "object",
+      "description": "Optional: present when this grid was built by 3D point-cloud sampling (--points) instead of tissue-grid tiling. Records the cloud source + sha256, µm units, kept/total point counts, and the z-axis calibration (z_scale_um, z_size) used to place each point on a plane. The grid then carries per-patch z_index / source_points sibling arrays (checked by validate-store, not this schema).",
+      "additionalProperties": true,
+      "properties": {
+        "mode": { "const": "points" },
+        "source": { "type": "string" },
+        "sha256": { "type": "string" },
+        "units": { "type": "string" },
+        "n_points": { "type": "integer" },
+        "n_kept": { "type": "integer" },
+        "z_scale_um": { "type": ["number", "null"] },
+        "z_size": { "type": "integer" }
+      }
+    }
   }
 }

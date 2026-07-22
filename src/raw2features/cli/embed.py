@@ -35,6 +35,21 @@ def embed(
         "big a pixel is. This is the source's resolution - NOT the extraction scale "
         "(use --mpp for that). Prefer fixing the source metadata over this override.",
     ),
+    points: str | None = typer.Option(
+        None,
+        "--points",
+        help="3D point-cloud file (CSV/Parquet with x,y,z in µm, + optional id). When "
+        "set, patches are sampled at these points on their z-plane instead of tissue-"
+        "grid tiling; segmentation/--no-seg/--tissue-threshold are ignored. Output "
+        "coords gain per-point z_index/source_points siblings.",
+    ),
+    source_z_spacing: float | None = typer.Option(
+        None,
+        "--source-z-spacing",
+        help="Physical z-plane spacing (µm/plane) of the SOURCE. Only needed with "
+        "--points when the OME-Zarr z axis declares no unit, so a µm depth can be "
+        "mapped to a plane. The z analogue of --source-mpp.",
+    ),
     patch_size: int | None = typer.Option(
         None,
         "--patch-size",
@@ -186,6 +201,19 @@ def embed(
             f"geometry: {','.join(g0.models)} -> {g0.mpp:g}/{g0.patch_px} ({g0.source})"
         )
 
+    # 3D point sampling: fold the cloud's content fingerprint into the run identity, and
+    # note that tissue-selection options don't apply (points ARE the selection).
+    points_sha256 = None
+    if points:
+        from raw2features.core.points import point_cloud_fingerprint
+
+        points_sha256 = point_cloud_fingerprint(points)
+        if no_seg or segmenter != "otsu" or tissue_threshold != 0.1:
+            typer.echo(
+                "note: --points samples at the given coordinates; "
+                "--segmenter/--no-seg/--tissue-threshold are ignored."
+            )
+
     cfg = RunConfig(
         models=models,
         reader=reader,
@@ -193,6 +221,9 @@ def embed(
         no_seg=no_seg,
         target_mpp=mpp if mpp is not None else 1.0,  # per-group geometry overrides this
         source_mpp=source_mpp,
+        source_z_spacing=source_z_spacing,
+        points_path=points,
+        points_sha256=points_sha256,
         patch_px=patch_size if patch_size is not None else 224,
         step_px=step,
         tissue_threshold=tissue_threshold,

@@ -112,11 +112,14 @@ class ZarrSink(Sink):
         fresh: bool = True,
         n_patches: int,
         coords: np.ndarray,
-        grid_index: np.ndarray,
+        grid_index: np.ndarray | None,
         grid_tissue: np.ndarray | None,
         model_dims: dict[str, int],
         header: dict,
         features_dtype: str = "float16",
+        z_index: np.ndarray | None = None,
+        source_points: np.ndarray | None = None,
+        point_ids: np.ndarray | None = None,
     ) -> str:
         """Write the ``grids/<grid>/`` grid.
 
@@ -152,7 +155,6 @@ class ZarrSink(Sink):
         g.attrs["raw2features"] = header
 
         coords = np.asarray(coords, dtype=np.int32).reshape(-1, 2)
-        grid_index = np.asarray(grid_index, dtype=np.int32).reshape(-1, 2)
         c = g.create_array(
             "coords",
             shape=coords.shape,
@@ -164,15 +166,23 @@ class ZarrSink(Sink):
         c.attrs["role"] = "coords"
         c.attrs["units"] = "level0_px"
 
-        gi = g.create_array(
-            "grid_index",
-            shape=grid_index.shape,
-            chunks=(_patch_chunk_size(n_patches), 2),
-            dtype="int32",
-        )
-        if n_patches:
-            gi[:] = grid_index
-        gi.attrs["role"] = "grid_index"
+        # grid_index only applies to a regular tissue grid (row, col); a point-sampled
+        # grid has no (row, col) and omits it (an optional array by the read contract).
+        if grid_index is not None:
+            grid_index = np.asarray(grid_index, dtype=np.int32).reshape(-1, 2)
+            gi = g.create_array(
+                "grid_index",
+                shape=grid_index.shape,
+                chunks=(_patch_chunk_size(n_patches), 2),
+                dtype="int32",
+            )
+            if n_patches:
+                gi[:] = grid_index
+            gi.attrs["role"] = "grid_index"
+
+        # Point-sampling siblings: the per-patch z-plane, the source µm centers, and
+        # optional point ids - each 1:1 with coords. Absent for a 2D tissue grid.
+        self._write_point_arrays(g, n_patches, z_index, source_points, point_ids)
 
         if grid_tissue is not None:
             mask = (np.clip(grid_tissue, 0.0, 1.0) * 255).astype(np.uint8)
@@ -197,6 +207,43 @@ class ZarrSink(Sink):
         self._group = g
         self._active_key = actual_grid
         return actual_grid
+
+    @staticmethod
+    def _write_point_arrays(g, n_patches, z_index, source_points, point_ids) -> None:
+        """Write the point-sampling sibling arrays (all optional, each 1:1 with coords).
+
+        ``z_index`` (N,) is the per-patch level-0 z-plane; ``source_points`` (N,3) are
+        the source µm centers (relocatability); ``point_ids`` (N,) carries caller ids
+        when the cloud had them. A 2D tissue grid passes all ``None`` and writes none.
+        """
+        if z_index is not None:
+            zi = g.create_array(
+                "z_index", shape=(n_patches,),
+                chunks=(_patch_chunk_size(n_patches),), dtype="int32",
+            )
+            if n_patches:
+                zi[:] = np.asarray(z_index, dtype=np.int32).reshape(-1)
+            zi.attrs["role"] = "z_index"
+            zi.attrs["units"] = "z_plane"
+        if source_points is not None:
+            sp = g.create_array(
+                "source_points", shape=(n_patches, 3),
+                chunks=(_patch_chunk_size(n_patches), 3), dtype="float64",
+            )
+            if n_patches:
+                sp[:] = np.asarray(source_points, dtype=np.float64).reshape(-1, 3)
+            sp.attrs["role"] = "source_points"
+            sp.attrs["units"] = "um"
+        ids_flat = np.asarray(point_ids).reshape(-1) if point_ids is not None else []
+        if len(ids_flat) and any(str(i) for i in ids_flat):
+            ids = np.asarray(point_ids, dtype=object).reshape(-1).astype(str)
+            pid = g.create_array(
+                "point_ids", shape=(n_patches,),
+                chunks=(_patch_chunk_size(n_patches),), dtype=str,
+            )
+            if n_patches:
+                pid[:] = ids
+            pid.attrs["role"] = "point_id"
 
     def open_append(
         self,

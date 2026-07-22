@@ -19,11 +19,15 @@ def write_sample_slide(
     size: int = 1024,
     levels: int = 3,
     seed: int = 0,
+    z: int = 1,
+    z_spacing: float = 1.0,
 ) -> str:
     """Write a synthetic OME-NGFF v0.4 slide and return its path.
 
     ``size`` is the level-0 side in pixels (square); ``levels`` halved pyramid levels;
-    ``mpp0`` the level-0 microns/pixel. Needs the ``[zarr]`` extra.
+    ``mpp0`` the level-0 microns/pixel. ``z`` is the number of z-planes (a z-stack when
+    ``> 1``; the default ``1`` is byte-identical to the flat 2D slide) and ``z_spacing``
+    their µm spacing - enough to exercise 3D point sampling. Needs the ``[zarr]`` extra.
     """
     import numpy as np
     import zarr
@@ -54,20 +58,30 @@ def write_sample_slide(
     blob = np.clip(base + noise, 0, 255).astype(np.uint8)
     img[inside] = blob[inside]
 
+    # Build the z-stack: plane 0 is ``img``; deeper planes shift brightness by a
+    # per-plane constant so the planes are distinguishable (a test can assert the right
+    # plane was read). z=1 leaves a single plane identical to the flat 2D slide.
+    depth = max(1, int(z))
+    vol = np.stack(
+        [np.clip(img.astype(np.int16) + p * 8, 0, 255).astype(np.uint8)
+         for p in range(depth)],
+        axis=0,
+    )  # (z, H, W, 3)
+
     g = zarr.open_group(str(out_path), mode="w", zarr_format=2)
     sizes: list[tuple[int, int]] = []
-    cur = img
+    cur = vol
     for i in range(int(levels)):
-        lh, lw = cur.shape[:2]
+        lh, lw = cur.shape[1], cur.shape[2]
         sizes.append((lh, lw))
         a = g.create_array(
             str(i),
-            shape=(1, 3, 1, lh, lw),
+            shape=(1, 3, depth, lh, lw),
             chunks=(1, 1, 1, min(256, lh), min(256, lw)),
             dtype="uint8",
         )
-        a[0, :, 0] = np.transpose(cur, (2, 0, 1))  # (H,W,3) -> (3,H,W)
-        cur = cur[::2, ::2]  # halve for the next pyramid level
+        a[0] = np.transpose(cur, (3, 0, 1, 2))  # (z,H,W,3) -> (c=3, z, H, W)
+        cur = cur[:, ::2, ::2]  # halve y/x for the next pyramid level (z unchanged)
 
     axes = [
         {"name": "t", "type": "time", "unit": "second"},
@@ -82,7 +96,7 @@ def write_sample_slide(
             "coordinateTransformations": [
                 {
                     "type": "scale",
-                    "scale": [1.0, 1.0, 1.0, mpp0 * (2**i), mpp0 * (2**i)],
+                    "scale": [1.0, 1.0, z_spacing, mpp0 * (2**i), mpp0 * (2**i)],
                 }
             ],
         }
@@ -91,4 +105,41 @@ def write_sample_slide(
     g.attrs["multiscales"] = [
         {"version": "0.4", "name": "sample", "axes": axes, "datasets": datasets}
     ]
+    return str(out_path)
+
+
+def write_sample_points(
+    out_path: str,
+    *,
+    mpp0: float = 0.5,
+    size: int = 1024,
+    z: int = 4,
+    z_spacing: float = 1.0,
+    n_side: int = 4,
+) -> str:
+    """Write a tiny CSV point cloud (x,y,z in µm, + id) inside a sample slide's tissue.
+
+    Places an ``n_side`` x ``n_side`` grid of points across the central tissue ellipse,
+    cycling the z-plane per point, so the whole 3D point-sampling path runs offline. The
+    coordinates are physical µm to match :func:`write_sample_slide` (``mpp0``, level-0
+    ``size`` px, ``z`` planes at ``z_spacing`` µm).
+    """
+    import csv
+
+    span = size * mpp0  # slide extent in µm
+    lo, hi = 0.30 * span, 0.70 * span  # stay inside the tissue ellipse
+    step = (hi - lo) / max(1, n_side - 1)
+    rows = []
+    k = 0
+    for r in range(n_side):
+        for c in range(n_side):
+            x_um = lo + c * step
+            y_um = lo + r * step
+            z_um = (k % max(1, z)) * z_spacing
+            rows.append((f"{x_um:.4f}", f"{y_um:.4f}", f"{z_um:.4f}", f"pt_{k:03d}"))
+            k += 1
+    with open(str(out_path), "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["x", "y", "z", "id"])
+        writer.writerows(rows)
     return str(out_path)
