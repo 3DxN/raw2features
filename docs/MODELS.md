@@ -272,6 +272,22 @@ back to **1.0 µm/px** unless run alongside a model that supplies one or given a
 > against drift between our value and the config; it can't catch a config that's wrong to
 > begin with.
 
+## Offline / local weights
+
+A model whose registry entry declares a `local_arch` (currently `uni2_h`) can be loaded
+from a local file with no Hugging Face access:
+
+```bash
+raw2features embed slide.ome.zarr out/ -m uni2_h --weights uni2_h=/models/UNI2-h
+```
+
+`PATH` is the weights file or a directory holding the registry's `weights_filename`
+(`pytorch_model.bin` for UNI2-h). The architecture is built from `local_arch` +
+`timm_kwargs` with `pretrained=False`, and the file must match the pinned
+`weights_sha256` - it is verified before deserialising, so a local run's outputs and
+`output_fingerprint` are identical to a Hub-loaded run. The model header records
+`weights_source: "local_file"`. `--weights` is accepted by `embed` and `embed-many`.
+
 ## Install notes for the special families
 
 - `conch` - needs the `conch` extra **plus** its non-PyPI git package, pinned to the

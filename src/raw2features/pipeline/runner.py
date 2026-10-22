@@ -13,12 +13,13 @@ import queue
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from typing import Any, ClassVar
 
 from raw2features.benchmark.profiler import null_profiler
 from raw2features.core import plugins, provenance
+from raw2features.core.falsecolor import PseudoHEParams
 from raw2features.core.geometry import Point, Region, Size
 from raw2features.core.store import grid_key
 from raw2features.core.uris import (
@@ -48,6 +49,7 @@ from raw2features.sinks.zarr_sink import (
 )
 
 from .receipt import (
+    EXTENDED_SCHEMA_VERSION,
     SCHEMA_VERSION,
     Receipt,
     canonical_source_uri,
@@ -81,6 +83,81 @@ def _positive_int(value, *, field: str) -> int:
     if integer != value or integer <= 0:
         raise ValueError(f"{field} must be an integer greater than zero")
     return integer
+
+
+def parse_z_planes(spec: str, z_count: int | None) -> list[int]:
+    """Resolve a z-plane request against a source's z extent.
+
+    ``spec`` is ``"all"``, a comma list (``"0,3,5"``), or a Python-style slice
+    (``"2:10"``, ``"0::2"``). With ``z_count=None`` only the syntax is checked.
+    """
+    text = spec.strip().lower()
+    try:
+        if text == "all":
+            planes = list(range(z_count)) if z_count is not None else []
+        elif ":" in text:
+            parts = [int(p) if p.strip() else None for p in text.split(":")]
+            if len(parts) > 3 or (len(parts) == 3 and parts[2] == 0):
+                raise ValueError
+            planes = (
+                list(range(z_count)[slice(*parts)]) if z_count is not None else []
+            )
+        else:
+            planes = [int(p) for p in text.split(",")]
+    except ValueError:
+        raise ValueError(
+            f"invalid z-plane selection {spec!r}: use 'all', '0,3,5' or "
+            "'start:stop[:step]'"
+        ) from None
+    if any(z < 0 for z in planes):
+        raise ValueError(f"z planes must be non-negative, got {spec!r}")
+    if z_count is not None:
+        bad = [z for z in planes if z >= z_count]
+        if bad:
+            raise ValueError(f"z planes {bad} out of range (source z extent {z_count})")
+        if not planes:
+            raise ValueError(f"z-plane selection {spec!r} selects no planes")
+    return sorted(dict.fromkeys(planes))
+
+
+@contextmanager
+def _open_source(slide_path: str, cfg: RunConfig):
+    """Open the configured reader on ``cfg``'s z plane, as pseudo-H&E if requested.
+
+    The single place a run's pixel source is opened, so the main process, the
+    multi-device workers and the multiplex context read the same plane and view.
+    """
+    reader_cls = plugins.get("readers", cfg.reader)
+    with reader_cls(slide_path) as reader:
+        if cfg.z_index is not None:
+            reader.set_plane(cfg.z_index)
+        if cfg.pseudo_he is None:
+            yield reader
+            return
+        from raw2features.readers.pseudo_he import PseudoHEView
+
+        yield PseudoHEView(reader, cfg.pseudo_he)
+
+
+def resolve_source_planes(slide_path: str, cfg: RunConfig) -> RunConfig:
+    """Resolve ``z_planes`` against the source and validate the pseudo-H&E binding.
+
+    A no-op (returns ``cfg`` unchanged) for the 2D brightfield default.
+    """
+    if cfg.z_planes is None and cfg.pseudo_he is None:
+        return cfg
+    reader_cls = plugins.get("readers", cfg.reader)
+    with reader_cls(slide_path) as reader:
+        planes = (
+            parse_z_planes(cfg.z_planes, reader.z_count)
+            if cfg.z_planes is not None
+            else []
+        )
+        if cfg.pseudo_he is not None:
+            from raw2features.readers.pseudo_he import PseudoHEView
+
+            PseudoHEView(reader, cfg.pseudo_he)  # raises on an unresolvable channel
+    return replace(cfg, resolved_z_planes=planes)
 
 
 def _registered_models_need_nuclear(models: list[str]) -> bool:
@@ -280,9 +357,60 @@ class RunConfig:
     # Example: {"kronos2": {...}}. No built-in option is silently accepted: each
     # embedder's bind_multiplex_panel hook validates its own namespace.
     native_multiplex_params: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # z-stack iteration. ``z_planes`` is the requested plane set ("all", "0,3,5",
+    # "start:stop[:step]"; None = the 2D single-plane default); it is runtime-only
+    # because each plane becomes its own grid whose identity is ``z_index``, so
+    # adding planes later appends grids instead of re-hashing existing ones.
+    # ``resolved_z_planes`` is filled from the source's z extent before grouping.
+    z_planes: str | None = None
+    resolved_z_planes: list[int] = field(default_factory=list)
+    z_index: int | None = None
+    # Physical patch side in µm; when set it defines target_mpp = patch_um / patch_px
+    # (the exact-MPP read then resamples each patch to patch_px). Runtime-only: the
+    # derived target_mpp carries the identity.
+    patch_um: float | None = None
+    # Grid origin offset as a fraction [0, 1) of the patch side, (x, y).
+    grid_offset: tuple[float, float] = (0.0, 0.0)
+    # Two-channel fluorescence -> pseudo-H&E view of the source (None = off).
+    pseudo_he: PseudoHEParams | None = None
+    # Local weight files per model ({model: path}) - offline loading, no Hub access.
+    # Runtime-only: the file must match the pinned weights_sha256.
+    local_weights: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Reject invalid geometry before hashing, model loading, or store writes."""
+
+        if self.patch_um is not None:
+            self.patch_um = _positive_float(self.patch_um, field="patch_um")
+            if self.snap_to_level:
+                raise ValueError(
+                    "patch_um fixes the physical patch size; it cannot be combined "
+                    "with snap_to_level (which reads at the nearest level's MPP)"
+                )
+            self.target_mpp = self.patch_um / _positive_int(
+                self.patch_px, field="patch_px"
+            )
+        offset = tuple(float(v) for v in self.grid_offset)
+        if len(offset) != 2 or not all(0.0 <= v < 1.0 for v in offset):
+            raise ValueError("grid_offset must be two fractions in [0, 1)")
+        self.grid_offset = offset  # type: ignore[assignment]
+        if self.z_index is not None and (
+            isinstance(self.z_index, bool) or int(self.z_index) < 0
+        ):
+            raise ValueError("z_index must be a non-negative integer")
+        if self.z_planes is not None:
+            self.z_planes = str(self.z_planes).strip() or None
+            if self.z_planes is not None:
+                parse_z_planes(self.z_planes, None)  # syntax check only
+        if self.pseudo_he is not None and (
+            self.multiplex_strategy is not None
+            or _registered_models_need_nuclear(self.models)
+        ):
+            raise ValueError(
+                "pseudo-H&E renders the source for RGB encoders; it cannot be "
+                "combined with a multiplex strategy or native multiplex model"
+            )
+        self.local_weights = {str(k): str(v) for k, v in self.local_weights.items()}
 
         self.target_mpp = _positive_float(self.target_mpp, field="target_mpp")
         self.patch_px = _positive_int(self.patch_px, field="patch_px")
@@ -528,6 +656,9 @@ class RunConfig:
         "mpp_tolerance",
         "allow_upsample",
         "amp",
+        "z_index",
+        "grid_offset",
+        "pseudo_he",
     )
     _RUNTIME_FIELDS: ClassVar[tuple[str, ...]] = (
         "device",
@@ -547,6 +678,10 @@ class RunConfig:
         "qc_artifact_mpp",
         "channel_names_override",
         "resolved_original_channel_names",
+        "z_planes",
+        "resolved_z_planes",
+        "patch_um",
+        "local_weights",
     )
 
     def _hash_payload(
@@ -647,6 +782,14 @@ class RunConfig:
                 # not perturb the hash of every existing run; only an actual override
                 # (which changes the grid) contributes to the identity.
                 continue
+            elif name in {"z_index", "pseudo_he"} and value is None:
+                continue  # 2D / brightfield defaults keep historical hashes
+            elif name == "grid_offset":
+                if value == (0.0, 0.0):
+                    continue
+                value = list(value)
+            elif name == "pseudo_he":
+                value = value.to_dict()
             payload[name] = value
         payload["schema_version"] = SCHEMA_VERSION
         return config_hash(payload)
@@ -1031,6 +1174,8 @@ def _resolve_multiplex_request(
     strategy = build_strategy(cfg.multiplex_strategy)
     if embedders is None:
         base_embedders = [build_embedder(name) for name in cfg.models]
+        for embedder in base_embedders:
+            embedder.local_weights = cfg.local_weights.get(embedder.name)
         registry_owned = True
     else:
         by_name = {embedder.name: embedder for embedder in embedders}
@@ -1045,8 +1190,7 @@ def _resolve_multiplex_request(
         base_embedders = [by_name[name] for name in cfg.models]
         registry_owned = False
 
-    reader_cls = plugins.get("readers", cfg.reader)
-    with reader_cls(slide_path) as reader:
+    with _open_source(slide_path, cfg) as reader:
         if cfg.channel_names_override:
             reader.apply_channel_names(cfg.channel_names_override)
         if not getattr(reader, "has_channel_axis", False):
@@ -1600,8 +1744,7 @@ def run_slide(
                     "multi-device path; run with a single --device (the panel is "
                     "bound per-slide and channels are read natively only there)."
                 )
-            reader_cls = plugins.get("readers", cfg.reader)
-            with reader_cls(slide_path) as reader:
+            with _open_source(slide_path, cfg) as reader:
                 if cfg.channel_names_override:
                     reader.apply_channel_names(cfg.channel_names_override)
                 if cfg.resolved_channel_names and (
@@ -1665,6 +1808,8 @@ def run_slide(
                         snap_to_level=cfg.snap_to_level,
                         mpp_tolerance=cfg.mpp_tolerance,
                         allow_upsample=cfg.allow_upsample,
+                        offset_x_frac=cfg.grid_offset[0],
+                        offset_y_frac=cfg.grid_offset[1],
                     )
                     grid = patcher.build_grid(reader)
                     with prof.stage("segment"):
@@ -1694,11 +1839,12 @@ def run_slide(
                         prov,
                         panel_meta,
                         run_contracts,
+                        cfg=cfg,
                     )
                     actual_grid_key = sink.create(
                         out_dir,
                         slide_id,
-                        grid=grid_key(grid.target_mpp, grid.patch_px),
+                        grid=grid_key(grid.target_mpp, grid.patch_px, cfg.z_index),
                         fresh=not store_exists,  # add a grid to an existing store
                         n_patches=n,
                         coords=coords,
@@ -1853,8 +1999,7 @@ def run_slide(
                     level0_patch,
                 ) = _store_geometry(out_path, grid_key_existing)
                 if qc_to_do or thumbnail_to_do:
-                    reader_cls = plugins.get("readers", cfg.reader)
-                    with reader_cls(slide_path) as reader:
+                    with _open_source(slide_path, cfg) as reader:
                         if cfg.channel_names_override:
                             reader.apply_channel_names(cfg.channel_names_override)
                         if cfg.resolved_channel_names and (
@@ -2083,6 +2228,13 @@ def resolve_run(
         ):
             group_cfg = replace(group_cfg, segmenter="nuclear")
         group_cfgs.append(group_cfg)
+    if cfg.resolved_z_planes:
+        # One grid per (geometry, z plane): each plane is segmented, tiled and
+        # embedded independently, with z_index as part of its grid identity.
+        groups = [g for g in groups for _z in cfg.resolved_z_planes]
+        group_cfgs = [
+            replace(gc, z_index=z) for gc in group_cfgs for z in cfg.resolved_z_planes
+        ]
     return groups, group_cfgs, _run_content_hash(group_cfgs)
 
 
@@ -2159,6 +2311,7 @@ def embed_slide(
         cfg,
         model_specs=model_specs,
     )
+    cfg = resolve_source_planes(slide_path, cfg)
     groups, group_cfgs, run_hash = resolve_run(
         cfg,
         requested_mpp,
@@ -2167,7 +2320,10 @@ def embed_slide(
         model_specs=model_specs,
     )
     out_path = os.path.join(out_dir, f"{slide_id}.embeddings.zarr")
-    grids = {grid_key(g.mpp, g.patch_px): list(g.models) for g in groups}
+    grids = {
+        grid_key(gc.target_mpp, gc.patch_px, gc.z_index): list(gc.models)
+        for gc in group_cfgs
+    }
     expected_output = f"file://{os.path.abspath(out_path)}"
     model_contracts = None
     if not multiplex_request:
@@ -2269,10 +2425,10 @@ def embed_slide(
             )
         )
     grids = {
-        (result.get("grid") or grid_key(group.mpp, group.patch_px)): list(
-            result.get("requested_models", group.models)
-        )
-        for group, result in zip(groups, results, strict=True)
+        (
+            result.get("grid") or grid_key(gc.target_mpp, gc.patch_px, gc.z_index)
+        ): list(result.get("requested_models", gc.models))
+        for gc, result in zip(group_cfgs, results, strict=True)
     }
     status = "skipped" if all(r["status"] == "skipped" for r in results) else "complete"
 
@@ -2663,6 +2819,7 @@ def _build_embedders_on(cfg: RunConfig, names: list[str], device: str) -> list:
     built = []
     for m in names:
         emb = build_embedder(m)
+        emb.local_weights = cfg.local_weights.get(m)
         _warn_scale_mismatch(cfg, emb.spec)
         dtype = _amp_dtype(_resolve_amp(cfg, emb.spec, device))
         built.append(emb.load(device=device, dtype=dtype, compile=cfg.compile))
@@ -3256,7 +3413,6 @@ def _embed_patches_multi(
     """
     import numpy as np
 
-    reader_cls = plugins.get("readers", cfg.reader)
     shards = _contiguous_shards(int(coords.shape[0]), len(devices))
     if not shards:
         return  # no patches: feature arrays were created empty, nothing to embed
@@ -3277,8 +3433,9 @@ def _embed_patches_multi(
                     native_model_params=cfg.native_multiplex_params,
                 )
             collector = _FeatureCollector(hi - lo, model_dims, cfg.features_dtype)
-            # Own reader per worker: per-reader chunk cache, thread-safe zarr reads.
-            with reader_cls(slide_path) as reader:
+            # Own reader per worker: per-reader chunk cache, thread-safe zarr reads;
+            # opened on the run's z plane / pseudo-H&E view like the main process.
+            with _open_source(slide_path, cfg) as reader:
                 # prof=None: aggregate stage timings across concurrent workers aren't
                 # meaningful, so the patch-parallel path is not profiled per stage.
                 _run_batches(
@@ -3727,6 +3884,10 @@ def _write_grid_thumbnail(
         overlay=True,
         overwrite=overwrite,
         overlay_name=overlay_name,
+        # Each z plane renders a different image, so it gets its own plain thumbnail.
+        plain_name=(
+            None if cfg.z_index is None else f"{slide_id}.z{cfg.z_index}.thumbnail.png"
+        ),
     )
     metadata["grid"] = key
     sink.update_thumbnail(metadata, update_root=(key == primary_key))
@@ -4056,6 +4217,10 @@ def _models_header(
         for e in embedders
     }
     for e in embedders:
+        if getattr(e, "local_weights", None):
+            # How the pinned bytes were obtained (not part of the output identity).
+            headers[e.name]["weights_source"] = "local_file"
+    for e in embedders:
         if e.spec.multiplex is None:
             continue
         # Mirror only the already credential-sanitized canonical fingerprint payload;
@@ -4086,6 +4251,8 @@ def _build_header(
     prov,
     panel_meta=None,
     model_contracts=None,
+    *,
+    cfg: RunConfig | None = None,
 ) -> dict:
     header = {
         "schema_version": SCHEMA_VERSION,
@@ -4134,7 +4301,40 @@ def _build_header(
     # brightfield runs. Part of the reproducibility record for a multiplex embedding.
     if panel_meta:
         header["panel"] = panel_meta
+    if cfg is not None:
+        _add_extended_header(header, reader, grid, cfg)
     return header
+
+
+def _add_extended_header(header: dict, reader, grid, cfg: RunConfig) -> None:
+    """Optional format-0.2 keys: z plane, grid offset, physical size, pseudo-H&E.
+
+    Written only when the run uses one of these features, so a default 2D brightfield
+    header (and its ``schema_version`` 0.1) is unchanged.
+    """
+    extended = False
+    patching, source = header["patching"], header["source"]
+    if cfg.z_index is not None:
+        extended = True
+        patching["z_index"] = int(cfg.z_index)
+        patching["z_um"] = reader.z_um
+        source["z_count"] = int(reader.z_count)
+        source["z_scale_um"] = reader.z_scale_um
+    if cfg.grid_offset != (0.0, 0.0):
+        extended = True
+        patching["grid_offset_frac"] = list(cfg.grid_offset)
+        patching["level0_offset"] = list(grid.level0_offset)
+    if cfg.patch_um is not None:
+        extended = True
+        patching["patch_um"] = cfg.patch_um
+        patching["achieved_patch_um"] = grid.patch_px * grid.achieved_mpp
+    provenance_fn = getattr(reader, "provenance", None)
+    if cfg.pseudo_he is not None and callable(provenance_fn):
+        extended = True
+        reader.backgrounds()  # ensure this plane's resolved background is recorded
+        source["pseudo_he"] = provenance_fn()
+    if extended:
+        header["schema_version"] = EXTENDED_SCHEMA_VERSION
 
 
 def _source_channel_metadata(reader) -> dict:

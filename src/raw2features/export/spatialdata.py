@@ -353,6 +353,11 @@ def _build_table(
         "level": int(patching.get("read_level", 0)),
         "mpp": float(patching.get("achieved_mpp") or patching.get("target_mpp") or 0.0),
     }
+    if patching.get("z_index") is not None:
+        # z-stack plane this grid was extracted from (one grid per plane).
+        obs["z"] = int(patching["z_index"])
+        if patching.get("z_um") is not None:
+            obs["z_um"] = float(patching["z_um"])
     if grid_index is not None:
         obs["array_row"] = grid_index[:, 0]
         obs["array_col"] = grid_index[:, 1]

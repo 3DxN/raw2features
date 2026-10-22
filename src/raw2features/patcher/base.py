@@ -37,6 +37,8 @@ class PatchGrid:
     n_cols: int
     xs: tuple[int, ...]  # level-0 x of each column
     ys: tuple[int, ...]  # level-0 y of each row
+    # level-0 (x, y) origin of the first tile; (0, 0) unless a grid offset is set
+    level0_offset: tuple[int, int] = (0, 0)
 
 
 class Patcher(ABC):

@@ -156,6 +156,11 @@ class ModelSpec:
     # Optional upstream modules that register custom timm architectures. These are
     # packaged registry values, never user-supplied runtime imports.
     registration_modules: tuple[str, ...] = ()
+    # Bare timm architecture name for offline loading from a local weights file
+    # (``--weights MODEL=PATH``). Building it with ``timm_kwargs`` and
+    # ``pretrained=False`` must reproduce the Hub model exactly; the local file is
+    # checked against ``weights_sha256``, so output identity is unchanged.
+    local_arch: str | None = None
 
     @property
     def extract_px(self) -> int:
@@ -171,6 +176,8 @@ class Embedder(ABC):
         self._model: Any = None
         self._device: str = "cpu"
         self._dtype: Any = None
+        # Optional local weights file/dir (offline load); see ModelSpec.local_arch.
+        self.local_weights: str | None = None
 
     @property
     def name(self) -> str:

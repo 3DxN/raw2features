@@ -404,6 +404,41 @@ if its tissue fraction ≥ `--tissue-threshold`. `--no-seg` tiles the whole slid
 are pluggable via the `segmenters` seam - see
 [`SEGMENTATION.md`](SEGMENTATION.md) for the methods and the GrandQC QC layer.
 
+### z-stacks, physical patch size and grid offset
+
+`--z-planes all` (or `0,3,5`, or a slice `start:stop[:step]`) processes a 3D source
+plane by plane: every selected plane is segmented, tiled and embedded independently and
+written as its own grid, `grids/<key>_z<k>/`, with `patching.z_index` / `z_um` in its
+header. Without `--z-planes` a z-stack is read at `z=0` only (with a warning). Adding
+planes later appends grids; already-complete planes are skipped.
+
+`--patch-um 112` fixes the **physical** patch side: each patch covers exactly 112 µm and
+is resampled to `--patch-size` px (default 224), i.e. `--mpp = patch_um / patch_size`.
+Tiling is dense and non-overlapping; `--grid-offset-x/--grid-offset-y` shift the grid
+origin by a fraction `[0, 1)` of the patch side (only whole tiles inside the image are
+kept). These options apply to `embed`, `embed-many`, `verify` and `thumbnail` alike.
+
+```bash
+raw2features embed stack.ome.zarr out/ -m uni2_h --z-planes all \
+    --patch-um 112 --patch-size 224 --grid-offset-x 0.5 --grid-offset-y 0.5
+```
+
+### Fluorescence as pseudo-H&E (`--pseudo-he`)
+
+`--pseudo-he --he-nuclear-channel DAPI --he-cyto-channel Eosin` renders two fluorescent
+channels (by name or index) as virtual H&E and runs the **whole brightfield pipeline** -
+segmentation, thumbnails, stain normalisation, any RGB encoder - on that image. The
+transform is the Beer-Lambert false colouring of Giacomelli et al. (2016) / Serafin et
+al. (2020) (re-implemented; see `raw2features.core.falsecolor`): per channel
+`I' = max(I - bg, 0)^gamma * 255 / norm`, then
+`RGB = 255 * exp(-(k_n * β_n * N' + k_e * β_e * E'))`. Parameters: `--he-nuclear-norm`
+(8500), `--he-cyto-norm` (2000), `--he-nuclear-k` (0.08), `--he-cyto-k` (0.012),
+`--he-gamma` (0.85), `--he-nuclear-bg`/`--he-cyto-bg` (a level or `auto` = 1/5 of the
+95th percentile above `--he-bg-threshold`, estimated per z plane),
+`--he-nuclear-color`/`--he-cyto-color` (`r,g,b` absorption vectors). The resolved
+parameters and backgrounds are recorded under `source.pseudo_he`. Try it on synthetic
+data: `raw2features sample s3d.ome.zarr --fluorescence --z 4`.
+
 ### Multi-model fan-out (decode-once)
 
 With several `-m` flags (`-f` is an alias), each patch is **read and decoded once**

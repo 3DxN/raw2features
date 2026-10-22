@@ -107,6 +107,10 @@ def export_h5(
     out_dir = out_dir or os.path.dirname(os.path.abspath(os.path.normpath(store)))
     os.makedirs(out_dir, exist_ok=True)
     slide_id = _slide_id(store)
+    # A z-stack plane's grid exports as <slide>.z<k>[.<model>].h5 so planes never
+    # overwrite one another.
+    if patching.get("z_index") is not None:
+        slide_id = f"{slide_id}.z{int(patching['z_index'])}"
     single = len(selected) == 1
 
     written: list[str] = []

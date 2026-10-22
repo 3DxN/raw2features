@@ -25,6 +25,16 @@ complete effective panel remains in source/panel provenance. When nuclear maskin
 enabled, the resolved physical nuclear-channel index or same-stain index group is also
 part of grid identity.
 
+## Fluorescence rendered as pseudo-H&E
+
+A two-channel fluorescence image (a nuclear stain plus a cytoplasm/stroma stain) can
+instead be rendered as virtual H&E with `--pseudo-he` and processed exactly like a
+brightfield slide: segmentation (`otsu`, `grandqc`, …), thumbnails and every registered
+RGB encoder see the false-coloured image. The reader is wrapped in a `PseudoHEView`, so
+the transform runs per pixel at native resolution before the exact-MPP resample. It
+cannot be combined with a multiplex strategy or native multiplex encoder. See
+[usage](usage.md#fluorescence-as-pseudo-he---pseudo-he) for the parameters.
+
 ## Channel metadata
 
 The preferred source of channel identity is `omero.channels` in the OME-Zarr metadata.

@@ -138,7 +138,8 @@ Headers live under the `raw2features` group attr at two levels: a **grid header*
 A JSON object; the normative definition is the packaged JSON Schema (see
 [Conformance](#conformance)). Required keys:
 
-- `schema_version` - string, `"0.1"` for this spec.
+- `schema_version` - string, `"0.1"` for this spec; `"0.2"` for a grid that carries any
+  of the optional [format 0.2 keys](#format-02-z-stacks-grid-offset-pseudo-he).
 - `source` - the slide this was extracted from:
   `uri`, `slide_id`, `mpp_level0` (µm/px at level 0), `ngff_version`, `reader`,
   `level_dimensions` (`[[w, h], …]`), `level_downsamples`.
@@ -264,6 +265,27 @@ source is remote or read-only.
 > coordinate-systems work (OME-NGFF RFC-5) is still in review; recording the ingredients
 > now means a future NGFF-native emitter is a re-encode, not a re-extraction, without
 > committing the store to a shape the spec has not settled.
+
+### Format 0.2: z-stacks, grid offset, pseudo-H&E
+
+Format 0.2 is a strict superset of 0.1 (schema
+`embeddings_store-0.2.schema.json`). Its keys are optional and written only by grids that
+use the corresponding feature; a default 2D brightfield grid stays `"0.1"`.
+
+- **z-stacks.** Each z plane is its own grid, keyed `<key>_z<k>` (e.g.
+  `mpp0.5_px224_z3`); `coords` stay level-0 `(x, y)` `(N, 2)` within that plane.
+  `patching.z_index` (level-0 plane index), `patching.z_um` (plane position in µm, or
+  `null`), `source.z_count` (level-0 z extent) and `source.z_scale_um` (z step in µm, or
+  `null`) identify the plane. `z_index` is part of the grid's `grid_hash`.
+- **Grid offset / physical size.** `patching.grid_offset_frac` (`[fx, fy]`, fractions of
+  the patch side in `[0, 1)`) and `patching.level0_offset` (`[x, y]`, level-0 px of the
+  first tile's origin); `patching.patch_um` (requested physical patch side) and
+  `patching.achieved_patch_um` (`patch_px * achieved_mpp`).
+- **Pseudo-H&E.** `source.pseudo_he` records a two-channel fluorescence -> virtual H&E
+  rendering: `method`, `params` (channel selectors, normalisation factors, `k`
+  constants, gamma, backgrounds, dye colour vectors), the resolved `nuclear_index` /
+  `cyto_index` (and names), and `backgrounds` (the resolved per-z background levels).
+  `source.reader` still names the underlying reader.
 
 ## Versioning
 

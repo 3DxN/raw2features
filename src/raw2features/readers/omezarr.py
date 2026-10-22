@@ -61,12 +61,12 @@ def _chunk_cache_capacity() -> int:
 class _ChunkCache:
     """Thread-safe LRU cache of decompressed 2D (y, x) chunk planes.
 
-    Keyed by ``(level, c_index, chunk_y, chunk_x)``; the value is the decompressed
-    chunk plane (uint8/source dtype, edge-clipped to the array bounds), normalised
-    from the source axis order to ``(y, x)``. Adjacent ~224 px patches read in grid
-    order overlap the same 512x512 chunks, so caching the decompressed plane lets
-    the second patch reuse it instead of re-decompressing - and an RGB read touches
-    three channel chunks, all cached.
+    Keyed by ``(level, z_index, c_index, chunk_y, chunk_x)``; the value is the
+    decompressed chunk plane (uint8/source dtype, edge-clipped to the array
+    bounds), normalised from the source axis order to ``(y, x)``. Adjacent ~224 px
+    patches read in grid order overlap the same 512x512 chunks, so caching the
+    decompressed plane lets the second patch reuse it instead of re-decompressing -
+    and an RGB read touches three channel chunks, all cached.
 
     The reads run on the pipeline's parallel read-worker pool, so get/put are
     guarded by a lock. ``capacity`` bounds the cache to N planes (LRU eviction);
@@ -173,6 +173,19 @@ class OmeZarrReader(WSISource):
         # the on-disk chunk grid for whatever layout the store actually uses.
         self._chunk_hw: list[tuple[int, int]] = []
         self._chunk_cache = _ChunkCache(_chunk_cache_capacity())
+        # z-stack plane selection: ``_z`` is the selected level-0 z index (0 unless
+        # ``set_plane`` is called); ``_z_extents`` is the z extent per level (1 when
+        # the source has no z axis), so a level that also downsamples z maps the
+        # level-0 plane onto its own index. ``_z_plane_selected`` silences the
+        # "only z=0 is read" warning once the caller iterates planes explicitly.
+        self._z = 0
+        self._z_extents: list[int] = []
+        self._z_scale_um: float | None = None
+        self._z_origin_um = 0.0
+        self._z_plane_selected = False
+        # The "only z=0 is read" warning is deferred to the first pixel read, so a
+        # caller that selects planes right after open (z-stack runs) never sees it.
+        self._z_warning_pending = 0  # z extent to warn about (0 = nothing pending)
         # Float pixels have no dtype range to distinguish normalized [0, 1] from
         # byte-like [0, 255]. This multiplier is inferred once from level 0 at open
         # (255 or 1), then reused for every region and pyramid level. ``None`` means
@@ -234,6 +247,12 @@ class OmeZarrReader(WSISource):
         self._level0_translation_um = self._read_level0_translation_um(
             multiscales, units
         )
+        if "z" in self._dims and units.get("z") is not None:
+            self._z_scale_um = self._to_um(im0.scale["z"], units.get("z"))
+            self._z_origin_um = self._to_um(
+                float((im0.translation or {}).get("z", 0.0)),
+                units.get("z"),
+            )
 
         # Level dimensions (W, H) and downsamples from x scale ratios.
         xi, yi = self._dims.index("x"), self._dims.index("y")
@@ -242,6 +261,10 @@ class OmeZarrReader(WSISource):
         ]
         s0 = images[0].scale["x"]
         self._downsamples = [float(im.scale["x"] / s0) for im in images]
+        zi = self._dims.index("z") if "z" in self._dims else None
+        self._z_extents = [
+            int(im.data.shape[zi]) if zi is not None else 1 for im in images
+        ]
         self._build_level_mapping(multiscales["datasets"], xi, yi)
 
         # Plain zarr arrays for the hot read path.
@@ -290,6 +313,10 @@ class OmeZarrReader(WSISource):
             if axis in {"x", "y", "c"}:
                 continue
             extent = int(level0_shape[pos])
+            if axis == "z":
+                if extent > 1 and not self._z_plane_selected:
+                    self._z_warning_pending = extent
+                continue
             if extent > 1:
                 warnings.warn(
                     f"{source_uri(self.path)}: source has {axis}={extent}; only "
@@ -355,6 +382,44 @@ class OmeZarrReader(WSISource):
             self._level_off_x[level],
             self._level_off_y[level],
         )
+
+    # -- z-stack ---------------------------------------------------------------
+    @property
+    def z_count(self) -> int:
+        return self._z_extents[0] if self._z_extents else 1
+
+    @property
+    def z_index(self) -> int:
+        return self._z
+
+    @property
+    def z_scale_um(self) -> float | None:
+        return self._z_scale_um
+
+    @property
+    def z_um(self) -> float | None:
+        if self._z_scale_um is None:
+            return None
+        return self._z_origin_um + self._z * self._z_scale_um
+
+    def set_plane(self, z: int) -> None:
+        """Select the level-0 z plane every subsequent read is served from."""
+        z = int(z)
+        if not 0 <= z < self.z_count:
+            raise ValueError(
+                f"{source_uri(self.path)}: z={z} out of range (z extent {self.z_count})"
+            )
+        self._z = z
+        self._z_plane_selected = True
+        self._z_warning_pending = 0
+
+    def _level_z(self, level: int) -> int:
+        """Map the selected level-0 z plane onto ``level``'s own z index."""
+        z0 = self.z_count
+        zl = self._z_extents[level] if self._z_extents else 1
+        if zl == z0:
+            return self._z
+        return min(int(self._z * zl / z0), zl - 1)
 
     def apply_source_mpp(self, mpp_level0: float) -> None:
         """Set the level-0 physical pixel size (µm/px) for an *uncalibrated* source.
@@ -638,6 +703,14 @@ class OmeZarrReader(WSISource):
         Reads are clipped to the array bounds (the caller pads to the requested
         size), matching the prior direct-slice semantics for border patches.
         """
+        if self._z_warning_pending:
+            extent, self._z_warning_pending = self._z_warning_pending, 0
+            warnings.warn(
+                f"{source_uri(self.path)}: source has z={extent}; only z=0 is "
+                "read (the reader serves one 2D plane per patch; use --z-planes to "
+                "iterate the stack).",
+                stacklevel=2,
+            )
         level_h, level_w = self._level_dims[level].height, self._level_dims[level].width
         ch, cw = self._chunk_hw[level]
         # Clip the request to the array extent (a direct slice clips the same way).
@@ -665,6 +738,7 @@ class OmeZarrReader(WSISource):
         shape = [_axis_len[d] for d in nonscalar]
         block = np.empty(shape, dtype=arr.dtype)  # type: ignore[attr-defined]
 
+        z_val = self._level_z(level)
         # Chunk range covering the clipped window along y and x.
         cy0, cy1 = (y_lo // ch, (y_hi - 1) // ch) if clip_h else (0, -1)
         cx0, cx1 = (x_lo // cw, (x_hi - 1) // cw) if clip_w else (0, -1)
@@ -674,7 +748,7 @@ class OmeZarrReader(WSISource):
                 cy_lo, cy_hi = cy * ch, min((cy + 1) * ch, level_h)
                 for cx in range(cx0, cx1 + 1):
                     cx_lo, cx_hi = cx * cw, min((cx + 1) * cw, level_w)
-                    key = (level, c_val, cy, cx)
+                    key = (level, z_val, c_val, cy, cx)
                     plane = self._chunk_cache.get_or_read(
                         key,
                         partial(
@@ -685,6 +759,7 @@ class OmeZarrReader(WSISource):
                             cy_hi,
                             cx_lo,
                             cx_hi,
+                            z_val,
                         ),
                     )
                     # Intersection of this chunk with the requested window.
@@ -699,12 +774,20 @@ class OmeZarrReader(WSISource):
         return block, sliced
 
     def _read_chunk_plane(
-        self, arr: object, c_val: int | None, ys: int, ye: int, xs: int, xe: int
+        self,
+        arr: object,
+        c_val: int | None,
+        ys: int,
+        ye: int,
+        xs: int,
+        xe: int,
+        z_val: int = 0,
     ) -> np.ndarray:
         """Decompress one chunk-aligned (y, x) plane for a single channel.
 
-        Builds a full index over ``self._dims`` (extra axes -> 0, the c axis -> the
-        single channel ``c_val``, y/x -> the chunk's bounds), then explicitly
+        Builds a full index over ``self._dims`` (z -> ``z_val``, other extra axes
+        -> 0, the c axis -> the single channel ``c_val``, y/x -> the chunk's
+        bounds), then explicitly
         transposes the two surviving spatial dimensions from source order to
         ``(y, x)``. This keeps the cache contract independent of source axis order.
         """
@@ -716,6 +799,8 @@ class OmeZarrReader(WSISource):
                 idx.append(slice(xs, xe))
             elif d == "c":
                 idx.append(c_val)
+            elif d == "z":
+                idx.append(z_val)
             else:
                 idx.append(0)
         plane = np.asarray(arr[tuple(idx)])  # type: ignore[index]

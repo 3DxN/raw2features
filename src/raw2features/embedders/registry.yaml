@@ -120,6 +120,10 @@ uni2_h:
     dynamic_img_size: true
     mlp_layer: "timm.layers.SwiGLUPacked"
     act_layer: "torch.nn.SiLU"
+  # Bare timm architecture for offline loading from a local weights file
+  # (--weights uni2_h=PATH): timm_kwargs above override every dimension, so no
+  # Hub config is fetched. The file must match weights_sha256.
+  local_arch: vit_giant_patch14_224
   notes: "ViT-H/14 + SwiGLU + 8 register tokens, per UNI2-h card."
 
 path_orchestra:
