@@ -12,6 +12,7 @@ from raw2features.core.uris import redact_uri_credentials
 from raw2features.pipeline.runner import RunConfig, embed_slide
 from raw2features.viz import DEFAULT_THUMBNAIL_MPP
 
+from . import _extended as ext
 from ._validation import (
     parse_channel_names_file,
     parse_json_object,
@@ -225,6 +226,24 @@ def embed(
         help="Rebuild the store from scratch instead of adding missing models to it.",
     ),
     hf_token: str | None = typer.Option(None, "--hf-token", envvar="HF_TOKEN"),
+    weights: list[str] = ext.weights_option(),
+    z_planes: str | None = ext.z_planes_option(),
+    patch_um: float | None = ext.patch_um_option(),
+    grid_offset_x: float = ext.grid_offset_x_option(),
+    grid_offset_y: float = ext.grid_offset_y_option(),
+    pseudo_he: bool = ext.pseudo_he_option(),
+    he_nuclear_channel: str | None = ext.he_nuclear_channel_option(),
+    he_cyto_channel: str | None = ext.he_cyto_channel_option(),
+    he_nuclear_norm: float = ext.he_nuclear_norm_option(),
+    he_cyto_norm: float = ext.he_cyto_norm_option(),
+    he_nuclear_k: float = ext.he_nuclear_k_option(),
+    he_cyto_k: float = ext.he_cyto_k_option(),
+    he_gamma: float = ext.he_gamma_option(),
+    he_nuclear_bg: str = ext.he_nuclear_bg_option(),
+    he_cyto_bg: str = ext.he_cyto_bg_option(),
+    he_bg_threshold: float = ext.he_bg_threshold_option(),
+    he_nuclear_color: str = ext.he_nuclear_color_option(),
+    he_cyto_color: str = ext.he_cyto_color_option(),
 ) -> None:
     """Extract foundation-model patch embeddings from one OME-Zarr slide.
 
@@ -235,6 +254,26 @@ def embed(
     validate_amp(amp)
     validate_batch_size(batch_size)
     validate_geometry(mpp=mpp, patch_size=patch_size, step=step, source_mpp=source_mpp)
+    mpp, patch_size = ext.resolve_physical_patch(
+        patch_um, mpp, patch_size, config=config, snap_to_level=snap_to_level
+    )
+    grid_offset = ext.validate_grid_offset(grid_offset_x, grid_offset_y)
+    z_planes = ext.validate_z_planes(z_planes)
+    pseudo_he_params = ext.build_pseudo_he(
+        pseudo_he,
+        he_nuclear_channel,
+        he_cyto_channel,
+        he_nuclear_norm,
+        he_cyto_norm,
+        he_nuclear_k,
+        he_cyto_k,
+        he_gamma,
+        he_nuclear_bg,
+        he_cyto_bg,
+        he_bg_threshold,
+        he_nuclear_color,
+        he_cyto_color,
+    )
     validate_positive_int(
         multiplex_normalization_max_side_px,
         "--multiplex-normalization-max-side-px",
@@ -260,6 +299,7 @@ def embed(
         models = list(dict.fromkeys(e["model"] for e in geometry_config))
     else:
         models = list(feature_extractor)
+    local_weights = ext.parse_local_weights(list(weights), models)
     if kronos2_marker_contract is not None and "kronos2" not in models:
         raise typer.BadParameter(
             "requires `kronos2` in the requested model set",
@@ -330,6 +370,11 @@ def embed(
         qc_stain_norm=qc_stain_norm,
         qc_artifact_mpp=qc_artifact_mpp,
         output_zarr_format=output_zarr_format,
+        z_planes=z_planes,
+        patch_um=patch_um,
+        grid_offset=grid_offset,
+        pseudo_he=pseudo_he_params,
+        local_weights=local_weights,
     )
     try:
         summary = embed_slide(

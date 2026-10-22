@@ -20,6 +20,8 @@ from raw2features.core.uris import source_uri
 # normative store contract changes; package v0.2.0 therefore continues to write schema
 # 0.1. The matching JSON Schema ships under schema/embeddings_store-<version>.json.
 SCHEMA_VERSION = "0.1"
+# Grid headers that carry the optional z-stack / grid-offset / pseudo-H&E keys.
+EXTENDED_SCHEMA_VERSION = "0.2"
 
 
 @dataclass

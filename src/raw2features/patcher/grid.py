@@ -30,13 +30,25 @@ class GridPatcher(Patcher):
         snap_to_level: bool = False,
         mpp_tolerance: float = 0.001,
         allow_upsample: bool = False,
+        offset_x_frac: float = 0.0,
+        offset_y_frac: float = 0.0,
     ) -> None:
+        for name, frac in (
+            ("offset_x_frac", offset_x_frac),
+            ("offset_y_frac", offset_y_frac),
+        ):
+            if not 0.0 <= frac < 1.0:
+                raise ValueError(
+                    f"{name} must be in [0, 1) of the patch side, got {frac}"
+                )
         self.target_mpp = target_mpp
         self.patch_px = patch_px
         self.step_out_px = step_out_px if step_out_px is not None else patch_px
         self.snap_to_level = snap_to_level
         self.mpp_tolerance = mpp_tolerance
         self.allow_upsample = allow_upsample
+        self.offset_x_frac = float(offset_x_frac)
+        self.offset_y_frac = float(offset_y_frac)
 
     def build_grid(self, reader: WSISource) -> PatchGrid:
         mpp0 = reader.mpp
@@ -60,8 +72,13 @@ class GridPatcher(Patcher):
         level0_step = level0_step_px(self.step_out_px, plan.achieved_mpp, mpp0)
         w0, h0 = reader.level_dimensions[0]
 
-        xs = tuple(range(0, max(w0 - level0_patch, 0) + 1, level0_step))
-        ys = tuple(range(0, max(h0 - level0_patch, 0) + 1, level0_step))
+        # The grid origin shifts by a fraction of the physical patch side; only
+        # tiles fully inside the image are kept, so the leading strip is uncovered
+        # (an image smaller than one patch still yields its single origin tile).
+        ox = round(self.offset_x_frac * level0_patch)
+        oy = round(self.offset_y_frac * level0_patch)
+        xs = tuple(range(ox, max(w0 - level0_patch, ox) + 1, level0_step))
+        ys = tuple(range(oy, max(h0 - level0_patch, oy) + 1, level0_step))
         return PatchGrid(
             target_mpp=self.target_mpp,
             achieved_mpp=plan.achieved_mpp,
@@ -77,6 +94,7 @@ class GridPatcher(Patcher):
             n_cols=len(xs),
             xs=xs,
             ys=ys,
+            level0_offset=(ox, oy),
         )
 
     def tile(

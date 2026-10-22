@@ -20,9 +20,11 @@ from raw2features.pipeline.runner import (
     expected_model_contracts,
     resolve_multiplex_output_contracts,
     resolve_multiplex_source_config,
+    resolve_source_planes,
     slide_id_from_path,
 )
 
+from . import _extended as ext
 from ._validation import (
     parse_channel_names_file,
     parse_json_object,
@@ -130,10 +132,47 @@ def verify(
         None, "--config", help="YAML extraction plan (must match the embed run)."
     ),
     quiet: bool = typer.Option(False, "--quiet"),
+    z_planes: str | None = ext.z_planes_option(),
+    patch_um: float | None = ext.patch_um_option(),
+    grid_offset_x: float = ext.grid_offset_x_option(),
+    grid_offset_y: float = ext.grid_offset_y_option(),
+    pseudo_he: bool = ext.pseudo_he_option(),
+    he_nuclear_channel: str | None = ext.he_nuclear_channel_option(),
+    he_cyto_channel: str | None = ext.he_cyto_channel_option(),
+    he_nuclear_norm: float = ext.he_nuclear_norm_option(),
+    he_cyto_norm: float = ext.he_cyto_norm_option(),
+    he_nuclear_k: float = ext.he_nuclear_k_option(),
+    he_cyto_k: float = ext.he_cyto_k_option(),
+    he_gamma: float = ext.he_gamma_option(),
+    he_nuclear_bg: str = ext.he_nuclear_bg_option(),
+    he_cyto_bg: str = ext.he_cyto_bg_option(),
+    he_bg_threshold: float = ext.he_bg_threshold_option(),
+    he_nuclear_color: str = ext.he_nuclear_color_option(),
+    he_cyto_color: str = ext.he_cyto_color_option(),
 ) -> None:
     """Exit 0 if the slide is already complete & output-validated, else exit 1."""
     validate_amp(amp)
     validate_geometry(mpp=mpp, patch_size=patch_size, step=step, source_mpp=source_mpp)
+    mpp, patch_size = ext.resolve_physical_patch(
+        patch_um, mpp, patch_size, config=config, snap_to_level=snap_to_level
+    )
+    grid_offset = ext.validate_grid_offset(grid_offset_x, grid_offset_y)
+    z_planes = ext.validate_z_planes(z_planes)
+    pseudo_he_params = ext.build_pseudo_he(
+        pseudo_he,
+        he_nuclear_channel,
+        he_cyto_channel,
+        he_nuclear_norm,
+        he_cyto_norm,
+        he_nuclear_k,
+        he_cyto_k,
+        he_gamma,
+        he_nuclear_bg,
+        he_cyto_bg,
+        he_bg_threshold,
+        he_nuclear_color,
+        he_cyto_color,
+    )
     validate_positive_int(
         multiplex_normalization_max_side_px,
         "--multiplex-normalization-max-side-px",
@@ -211,9 +250,14 @@ def verify(
         allow_upsample=allow_upsample,
         amp=amp,
         device=resolve_device(device),
+        z_planes=z_planes,
+        patch_um=patch_um,
+        grid_offset=grid_offset,
+        pseudo_he=pseudo_he_params,
     )
     try:
         cfg = resolve_multiplex_source_config(slide, cfg)
+        cfg = resolve_source_planes(slide, cfg)
     except (OSError, ValueError) as exc:
         if not quiet:
             typer.echo(

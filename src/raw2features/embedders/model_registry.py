@@ -54,6 +54,7 @@ def load_registry() -> dict[str, ModelSpec]:
             crop_pct=d.get("crop_pct"),
             crop_mode=d.get("crop_mode"),
             registration_modules=tuple(d.get("registration_modules") or ()),
+            local_arch=d.get("local_arch"),
         )
     return specs
 
