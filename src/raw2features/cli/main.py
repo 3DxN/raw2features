@@ -10,6 +10,7 @@ import typer
 
 from raw2features import __version__
 from raw2features.cli.benchmark import benchmark
+from raw2features.cli.cluster import cluster
 from raw2features.cli.embed import embed
 from raw2features.cli.embed_many import embed_many
 from raw2features.cli.export_h5 import export_h5
@@ -38,6 +39,7 @@ app.command()(embed)
 app.command("embed-many")(embed_many)
 app.command()(verify)
 app.command()(thumbnail)
+app.command()(cluster)
 app.command("slide-embed")(slide_embed)
 app.command()(benchmark)
 app.command("export-spatialdata")(export_spatialdata)

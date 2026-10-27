@@ -653,6 +653,37 @@ Inline (`--emit-thumbnail`) also records the thumbnail metadata in the store's
 
 ---
 
+### `cluster` - trimodal clustering → JSON, OME-Zarr labels, glTF
+
+```bash
+raw2features cluster out/slide.embeddings.zarr [-m uni2_h] [--trimodal-model model.pt] \
+    [--write-labels] [--no-gltf] [--seed 0]
+```
+
+Assigns every embedded location (all grids, i.e. all z planes) of each model one
+integer cluster. **The trimodal inference is currently a placeholder** (a seeded random
+choice of 7 or 23); its identity is the sha256 of `--trimodal-model`, or a flagged
+placeholder hash. Locations are addressed by **feature ID** `<grid_key>/<row>` (e.g.
+`mpp0.5_px224_z1/17` = row 17 of `grids/mpp0.5_px224_z1/features/<model>`), centred at
+the patch centre `(x, y)` on its plane `z`. Per model it writes:
+
+- `<slide>.<model>.clusters.json` - `clusters` and `locations_zyx` keyed by feature
+  ID, `feature_ids` (the glTF mesh order), and both models' sha256
+  (`embedding_model.sha256` is the pinned `weights_sha256`, or the output fingerprint
+  for models without one - see `sha256_kind`).
+- `<slide>.<model>.clusters.glb` - binary glTF scene with one sphere mesh per
+  location; mesh *i*, node *i* and their `name` / `extras.feature_id` are the *i*-th
+  feature ID, node `translation` = level-0 `(x, y, z)` voxel. Colour by joining the
+  JSON `clusters` on feature ID.
+- `--write-labels` - an NGFF label image in the **source** OME-Zarr at
+  `labels/clusters_<last 8 of embedding sha>_<last 8 of trimodal sha>/` (the
+  `labels` listing is appended to), mirroring the image's axes, pyramid, chunking and
+  transforms with `c=1`. Each location is a sphere of radius `--sphere-radius` (16) px
+  at level 0, scaled per axis by each level's downsample (8 at a 2x level, …) so its
+  apparent size is constant. Where spheres overlap (planes are usually closer than
+  the radius) a voxel takes the nearest location's cluster, so every location keeps
+  its own centre. Only local sources can be written (`--source` for a local copy).
+
 ## 9. Cohort runs on SLURM
 
 `slurm/` ships a one-slide-per-task array, a per-batch ("shard") array, and a pre-flight

@@ -19,6 +19,10 @@ Notable changes to raw2features, newest first. This project follows
 - Store format 0.2 (strict superset of 0.1) documents the new optional header keys;
   default 2D brightfield runs still write 0.1 and keep their content/grid hashes.
 - `raw2features sample --fluorescence --z N` writes a synthetic fluorescence z-stack.
+- `raw2features cluster` assigns each embedded location a trimodal-model cluster
+  (placeholder inference for now) and writes per-model JSON (with embedding and
+  trimodal sha256), a binary glTF scene (one mesh per location, named by feature ID) and,
+  with `--write-labels`, an NGFF label image of resolution-scaled spheres in the source.
 
 ## [0.2.1] - 2026-08-16
 
