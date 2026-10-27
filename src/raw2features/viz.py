@@ -236,16 +236,20 @@ def write_thumbnails(
     overlay: bool = False,
     overwrite: bool = True,
     overlay_name: str | None = None,
+    plain_name: str | None = None,
 ) -> dict:
     """Render + save the plain thumbnail (and the QC overlay if requested).
 
     ``overwrite=False`` repairs only missing assets, preserving an existing plain
     thumbnail while (for example) recreating a deleted overlay. ``overlay_name``
-    gives a non-primary grid its own namespaced overlay (a basename, not a path).
+    gives a non-primary grid its own namespaced overlay (a basename, not a path);
+    ``plain_name`` likewise names the plain thumbnail (e.g. one per z plane).
     Returns provenance metadata (basenames + the read geometry) for ``.zattrs``.
     """
     thumb = render_thumbnail(reader, mpp=mpp, max_px=max_px)
-    plain_path = os.path.join(out_dir, f"{slide_id}.thumbnail.png")
+    if plain_name is not None and os.path.basename(plain_name) != plain_name:
+        raise ValueError("plain_name must be a basename, not a path")
+    plain_path = os.path.join(out_dir, plain_name or f"{slide_id}.thumbnail.png")
     if overwrite or not os.path.exists(plain_path):
         save_png(thumb.image, plain_path)
 

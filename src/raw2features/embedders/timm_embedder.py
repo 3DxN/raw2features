@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import os
 from typing import TYPE_CHECKING, Any
 
 from raw2features.core.plugins import register
@@ -56,7 +57,13 @@ class TimmEmbedder(Embedder):
         import torch
 
         kwargs = _resolve_callables(dict(self.spec.timm_kwargs))
-        if self.spec.checkpoint:
+        if self.local_weights is not None:
+            # Offline: build the bare architecture and load the vetted local file -
+            # no Hugging Face access at all.
+            path = self._local_weights_path()
+            model = timm.create_model(self._local_arch(), pretrained=False, **kwargs)
+            self._load_state_file(model, path, self.spec.checkpoint or {})
+        elif self.spec.checkpoint:
             # Weights are a bare HF .pth/.bin (no timm pretrained_cfg): build the
             # arch then load the checkpoint ourselves.
             model = timm.create_model(self.spec.source, pretrained=False, **kwargs)
@@ -86,7 +93,6 @@ class TimmEmbedder(Embedder):
         ``strict`` (default True). Prefers a ``weights_only`` load, falling back for
         checkpoints that pickle non-tensor metadata.
         """
-        import torch
 
         # Pin + verify the checkpoint bytes before deserialising, so the
         # weights_only=False fallback only ever unpickles vetted, pinned bytes. The
@@ -103,6 +109,46 @@ class TimmEmbedder(Embedder):
                 ckpt["repo"], ckpt["filename"], revision=self.spec.weights_revision
             )
             verify_sha256(path, self.spec.weights_sha256, what=self.spec.name)
+        self._load_state_file(model, path, ckpt)
+
+    def _local_arch(self) -> str:
+        """The timm architecture a local weights file is loaded into."""
+        if self.spec.local_arch:
+            return self.spec.local_arch
+        if self.spec.checkpoint and not self.spec.source.startswith("hf-hub:"):
+            return self.spec.source  # already a bare architecture name
+        raise ValueError(
+            f"{self.spec.name} does not support local weights (no local_arch in the "
+            "registry)"
+        )
+
+    def _local_weights_path(self) -> str:
+        """Resolve ``local_weights`` (a file, or a directory holding the pinned
+        ``weights_filename``) and verify it against the pinned sha256."""
+        path = os.path.expanduser(str(self.local_weights))
+        if os.path.isdir(path):
+            filename = (self.spec.checkpoint or {}).get("filename") or (
+                self.spec.weights_filename
+            )
+            if not filename:
+                raise ValueError(
+                    f"{self.spec.name}: weights directory given but the registry "
+                    "records no weights_filename; pass the file itself"
+                )
+            path = os.path.join(path, os.path.basename(str(filename)))
+        if not os.path.isfile(path):
+            raise FileNotFoundError(
+                f"{self.spec.name}: local weights not found: {path}"
+            )
+        # Verify before deserialising, exactly as for downloaded weights; a file that
+        # does not match the pin is refused rather than silently changing outputs.
+        verify_sha256(path, self.spec.weights_sha256, what=self.spec.name)
+        return path
+
+    def _load_state_file(self, model, path: str, ckpt: dict) -> None:
+        """Load a verified ``.pth``/``.bin`` state_dict file into ``model``."""
+        import torch
+
         try:
             state = torch.load(path, map_location="cpu", weights_only=True)
         except Exception:  # noqa: BLE001 - some .pth pickle non-tensor objects

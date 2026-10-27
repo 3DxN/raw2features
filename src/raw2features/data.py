@@ -92,3 +92,90 @@ def write_sample_slide(
         {"version": "0.4", "name": "sample", "axes": axes, "datasets": datasets}
     ]
     return str(out_path)
+
+
+def write_sample_fluorescence_stack(
+    out_path: str,
+    *,
+    z: int = 4,
+    mpp0: float = 0.5,
+    z_um: float = 2.0,
+    size: int = 1024,
+    levels: int = 3,
+    seed: int = 0,
+) -> str:
+    """Write a synthetic two-channel fluorescence z-stack (OME-NGFF v0.4, uint16).
+
+    Channels are labelled ``DAPI`` (nuclear) and ``Eosin`` (cytoplasm/stroma) in
+    ``omero.channels`` on a dark background, the input the pseudo-H&E view expects.
+    The tissue blob shrinks and drifts across the ``z`` planes (``z_um`` apart) so
+    each plane's mask and patches differ. Pyramid levels downsample x/y only.
+    """
+    import numpy as np
+    import zarr
+
+    rng = np.random.default_rng(seed)
+    h = w = int(size)
+    nz = int(z)
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    stack = np.zeros((2, nz, h, w), dtype=np.uint16)
+    nuclei = rng.uniform(0, 1, size=(max(40, size // 8), 2)) * np.array([h, w])
+    for k in range(nz):
+        t = k / max(nz - 1, 1)
+        cy, cx = h * (0.5 + 0.05 * t), w * (0.5 - 0.05 * t)
+        ry = (yy - cy) / (h * (0.40 - 0.08 * t))
+        rx = (xx - cx) / (w * (0.32 - 0.06 * t))
+        inside = (ry**2 + rx**2 <= 1.0).astype(np.float32)
+        eosin = inside * (1500.0 + 800.0 * np.clip(xx / max(w - 1, 1), 0, 1))
+        dapi = np.zeros((h, w), dtype=np.float32)
+        for ny, nx in nuclei:
+            dapi += 6000.0 * np.exp(-((yy - ny) ** 2 + (xx - nx) ** 2) / (2.0 * 6.0**2))
+        dapi *= inside
+        noise = rng.normal(30.0, 10.0, size=(2, h, w))
+        stack[0, k] = np.clip(dapi + noise[0], 0, 65535).astype(np.uint16)
+        stack[1, k] = np.clip(eosin + noise[1], 0, 65535).astype(np.uint16)
+
+    g = zarr.open_group(str(out_path), mode="w", zarr_format=2)
+    cur = stack
+    n_levels = 0
+    for i in range(int(levels)):
+        lh, lw = cur.shape[2:]
+        a = g.create_array(
+            str(i),
+            shape=(1, 2, nz, lh, lw),
+            chunks=(1, 1, 1, min(256, lh), min(256, lw)),
+            dtype="uint16",
+        )
+        a[0] = cur
+        n_levels += 1
+        cur = cur[:, :, ::2, ::2]
+
+    axes = [
+        {"name": "t", "type": "time", "unit": "second"},
+        {"name": "c", "type": "channel"},
+        {"name": "z", "type": "space", "unit": "micrometer"},
+        {"name": "y", "type": "space", "unit": "micrometer"},
+        {"name": "x", "type": "space", "unit": "micrometer"},
+    ]
+    datasets = [
+        {
+            "path": str(i),
+            "coordinateTransformations": [
+                {
+                    "type": "scale",
+                    "scale": [1.0, 1.0, z_um, mpp0 * (2**i), mpp0 * (2**i)],
+                }
+            ],
+        }
+        for i in range(n_levels)
+    ]
+    g.attrs["multiscales"] = [
+        {"version": "0.4", "name": "sample_3d", "axes": axes, "datasets": datasets}
+    ]
+    g.attrs["omero"] = {
+        "channels": [
+            {"label": "DAPI", "color": "0000FF", "window": {"start": 0, "end": 8000}},
+            {"label": "Eosin", "color": "FF00FF", "window": {"start": 0, "end": 4000}},
+        ]
+    }
+    return str(out_path)

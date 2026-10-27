@@ -14,6 +14,7 @@ import pytest
 import zarr
 
 from conftest import build_ngff_v04
+from raw2features.core.geometry import Point, Region, Size
 from raw2features.patcher.grid import GridPatcher
 from raw2features.pipeline.runner import _warn_channel_collapse
 from raw2features.readers.omezarr import OmeZarrReader
@@ -160,14 +161,18 @@ def test_apply_source_mpp_lets_an_uncalibrated_source_proceed(tmp_path):
 def test_plane_collapse_warns_on_non_singleton_fixture_extra_axes(synthetic_ngff):
     # The fixture's extra axes are t and z; every extra axis is indexed at zero.
     with OmeZarrReader(synthetic_ngff) as r:
-        for shape, token in (
-            ((2, 3, 1, 300, 200), "t=2"),
-            ((1, 3, 4, 300, 200), "z=4"),
-        ):
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter("always")
-                r._warn_plane_collapse(shape)
-            assert any(token in str(w.message) for w in caught)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            r._warn_plane_collapse((2, 3, 1, 300, 200))
+        assert any("t=2" in str(w.message) for w in caught)
+        # z is deferred to the first pixel read, so a z-stack run that selects a
+        # plane right after open is never told "only z=0 is read".
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            r._warn_plane_collapse((1, 3, 4, 300, 200))
+            assert not caught
+            r.read_region(Region(0, Point(0, 0), Size(8, 8)))
+        assert any("z=4" in str(w.message) for w in caught)
         # A single-plane source (the common case) must not warn.
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")

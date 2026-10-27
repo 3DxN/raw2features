@@ -145,6 +145,34 @@ class WSISource(ABC):
             f"{type(self).__name__} does not support multi-channel reads"
         )
 
+    # -- z-stacks (optional; 2D readers keep the single-plane defaults) --------
+    @property
+    def z_count(self) -> int:
+        """Level-0 z extent; 1 for a 2D source."""
+        return 1
+
+    @property
+    def z_index(self) -> int:
+        """The level-0 z plane reads are served from."""
+        return 0
+
+    @property
+    def z_scale_um(self) -> float | None:
+        """Level-0 z step in µm, or ``None`` when unknown / 2D."""
+        return None
+
+    @property
+    def z_um(self) -> float | None:
+        """Physical z position (µm) of the selected plane, when known."""
+        return None
+
+    def set_plane(self, z: int) -> None:
+        """Select the z plane for every subsequent read (z-stack readers override)."""
+        if int(z) != 0:
+            raise NotImplementedError(
+                f"{type(self).__name__} serves a single plane; cannot select z={z}"
+            )
+
     def level_for_mpp(
         self, target_mpp: float, patch_px: int, **kwargs: object
     ) -> LevelChoice:

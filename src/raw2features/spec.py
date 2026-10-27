@@ -16,6 +16,9 @@ import json
 from importlib.resources import files
 
 SPEC_VERSION = "0.1"
+# 0.2 is a strict superset (optional z-stack / grid-offset / pseudo-H&E keys), written
+# only by grids that use those features.
+SUPPORTED_SPEC_VERSIONS = ("0.1", "0.2")
 
 _INT_DTYPES = (
     "int8",
@@ -71,7 +74,7 @@ def _header_schema_violations(header: dict) -> list[str]:
     if schema is None:
         return [
             f"no packaged JSON Schema for schema_version {version!r} "
-            f"(this build ships {SPEC_VERSION!r})"
+            f"(this build ships {', '.join(map(repr, SUPPORTED_SPEC_VERSIONS))})"
         ]
     validator = jsonschema.Draft202012Validator(schema)
     seen: dict[str, None] = {}  # ordered de-dup (a `required` error may repeat per key)
@@ -80,6 +83,20 @@ def _header_schema_violations(header: dict) -> list[str]:
         for line in _format_schema_error(err).split("; "):
             seen.setdefault(line, None)
     return list(seen)
+
+
+def stored_schema_versions(path: str) -> list[str]:
+    """Sorted distinct ``schema_version`` values of a store's grid headers."""
+    import zarr
+
+    from raw2features.core.store import GRIDS, grid_keys
+
+    root = zarr.open_group(path, mode="r", use_consolidated=False)
+    versions = {
+        str(dict(root[GRIDS][key].attrs).get("raw2features", {}).get("schema_version"))
+        for key in grid_keys(root)
+    }
+    return sorted(versions) or [SPEC_VERSION]
 
 
 def validate_store(path: str) -> list[str]:

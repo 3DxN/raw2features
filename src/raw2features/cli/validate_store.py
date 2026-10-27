@@ -15,12 +15,13 @@ def validate_store(
     ),
 ) -> None:
     """Validate a store against the embeddings-store spec; exit 0 if conformant."""
-    from raw2features.spec import SPEC_VERSION
+    from raw2features.spec import stored_schema_versions
     from raw2features.spec import validate_store as _validate
 
     violations = _validate(store)
     if not violations:
-        typer.echo(f"OK - conforms to embeddings-store spec v{SPEC_VERSION}")
+        versions = ", ".join(f"v{v}" for v in stored_schema_versions(store))
+        typer.echo(f"OK - conforms to embeddings-store spec {versions}")
         raise typer.Exit(0)
     typer.echo(f"NONCONFORMANT - {len(violations)} issue(s):", err=True)
     for item in violations:

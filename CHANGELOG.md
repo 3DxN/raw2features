@@ -3,6 +3,23 @@
 Notable changes to raw2features, newest first. This project follows
 [Semantic Versioning](https://semver.org).
 
+## [Unreleased]
+
+### 3D, fluorescence and physical-size extraction
+
+- `--z-planes` processes z-stacks plane by plane (segmentation, tiling, embedding), one
+  grid per plane (`grids/<key>_z<k>`). The OME-Zarr reader gains z-plane selection with
+  z-aware chunk caching.
+- `--pseudo-he` renders two fluorescent channels as virtual H&E (clean-room Beer-Lambert
+  false colouring after Giacomelli et al. 2016 / Serafin et al. 2020) for the whole
+  brightfield pipeline; all transform parameters are CLI-configurable.
+- `--patch-um` sets the physical patch side (resampled to `--patch-size`, default 224);
+  `--grid-offset-x/--grid-offset-y` shift the dense, non-overlapping grid origin.
+- `--weights MODEL=PATH` loads UNI2-h offline from a sha256-verified local file.
+- Store format 0.2 (strict superset of 0.1) documents the new optional header keys;
+  default 2D brightfield runs still write 0.1 and keep their content/grid hashes.
+- `raw2features sample --fluorescence --z N` writes a synthetic fluorescence z-stack.
+
 ## [0.2.1] - 2026-08-16
 
 This focused model update adds KRONOS2 to the existing native multiplex path and PRISM2

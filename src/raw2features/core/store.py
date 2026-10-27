@@ -16,14 +16,16 @@ from __future__ import annotations
 GRIDS = "grids"  # the root group holding one subgroup per geometry
 
 
-def grid_key(target_mpp: float, patch_px: int) -> str:
+def grid_key(target_mpp: float, patch_px: int, z_index: int | None = None) -> str:
     """Human-readable, filesystem-safe label for one geometry, e.g. ``mpp0.5_px224``.
 
     ``%g`` trims trailing zeros (0.5 -> ``0.5``, 1.0 -> ``1``, 0.25 -> ``0.25``), so the
-    key is stable and readable. The authoritative geometry still lives in the grid's
-    header; the key is only an addressable label.
+    key is stable and readable. A z-stack plane appends ``_z<k>`` (``mpp0.5_px224_z3``).
+    The authoritative geometry still lives in the grid's header; the key is only an
+    addressable label.
     """
-    return f"mpp{float(target_mpp):g}_px{int(patch_px)}"
+    key = f"mpp{float(target_mpp):g}_px{int(patch_px)}"
+    return key if z_index is None else f"{key}_z{int(z_index)}"
 
 
 def open_root(path: str, mode: str = "r"):
