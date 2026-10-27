@@ -8,6 +8,8 @@ import numpy as np
 
 from raw2features.core.store import GRIDS, grid_keys, open_root
 
+from .footprint import Footprints, concat, grid_footprints
+
 
 @dataclass
 class ModelLocations:
@@ -15,7 +17,8 @@ class ModelLocations:
 
     ``feature_ids[i]`` is ``"<grid_key>/<row>"`` and addresses
     ``grids/<grid_key>/features/<model>[row]``; ``centers_zyx[i]`` is the level-0
-    ``(z, y, x)`` voxel at the patch centre (z = the grid's ``z_index``, 0 for 2D).
+    ``(z, y, x)`` voxel at the patch centre (z = the grid's ``z_index``, 0 for 2D);
+    ``footprints`` holds each patch's exact level-0 area (see ``footprint``).
     """
 
     model: str
@@ -30,6 +33,7 @@ class ModelLocations:
     centers_zyx: np.ndarray = field(
         default_factory=lambda: np.zeros((0, 3), dtype=np.int64)
     )
+    footprints: Footprints = field(default_factory=lambda: concat([]))
     # Per-grid feature blocks, in feature_ids order (kept per grid for memory).
     features: list[tuple[str, object]] = field(default_factory=list)
 
@@ -60,6 +64,7 @@ def collect_locations(store: str, model: str) -> ModelLocations:
     out: ModelLocations | None = None
     ids: list[str] = []
     centers: list[np.ndarray] = []
+    boxes: list[Footprints] = []
     for key in grid_keys(root):
         g = root[GRIDS][key]
         if "features" not in g or model not in g["features"]:
@@ -87,8 +92,10 @@ def collect_locations(store: str, model: str) -> ModelLocations:
                 f"({sha[-8:]} vs {out.sha256[-8:]}); cluster each separately"
             )
         coords = np.asarray(g["coords"], dtype=np.int64).reshape(-1, 2)
-        half = int(patching["level0_patch"]) // 2
+        side = int(patching["level0_patch"])
+        half = side // 2
         z = int(patching.get("z_index") or 0)
+        boxes.append(grid_footprints(coords, side, z))
         block = np.empty((coords.shape[0], 3), dtype=np.int64)
         block[:, 0] = z
         block[:, 1] = coords[:, 1] + half
@@ -99,6 +106,7 @@ def collect_locations(store: str, model: str) -> ModelLocations:
     if out is None:
         raise ValueError(f"model {model!r} has no features in {store!r}")
     out.feature_ids = ids
+    out.footprints = concat(boxes)
     out.centers_zyx = (
         np.concatenate(centers) if centers else np.zeros((0, 3), dtype=np.int64)
     )

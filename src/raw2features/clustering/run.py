@@ -11,7 +11,7 @@ from .collect import collect_locations, store_models
 from .labels import label_name, local_source_path, write_label_image
 from .trimodal import predict_clusters, resolve_trimodal_sha256
 
-CLUSTERS_FORMAT = "raw2features-clusters/0.1"
+CLUSTERS_FORMAT = "raw2features-clusters/0.2"
 
 
 def cluster_store(
@@ -25,7 +25,6 @@ def cluster_store(
     source: str | None = None,
     labels_overwrite: bool = False,
     gltf: bool = True,
-    sphere_radius_px: float = 16.0,
 ) -> list[dict]:
     """Cluster each model's locations; return one summary per model."""
     from .gltf import write_glb
@@ -63,9 +62,8 @@ def cluster_store(
             label_path = write_label_image(
                 local_source_path(source or loc.source_uri),
                 name,
-                loc.centers_zyx,
+                loc.footprints,
                 clusters,
-                radius_px=sphere_radius_px,
                 expected_level0_wh=tuple(loc.level_dimensions[0]),
                 overwrite=labels_overwrite,
                 extra_metadata={"format": CLUSTERS_FORMAT, **identity},
@@ -76,8 +74,7 @@ def cluster_store(
             glb_path = write_glb(
                 f"{stem}.glb",
                 loc.feature_ids,
-                loc.centers_zyx,
-                radius_px=sphere_radius_px,
+                loc.footprints,
                 extras={
                     "scale_um": loc.scale_um,
                     "embedding_sha256": loc.sha256,
@@ -92,7 +89,9 @@ def cluster_store(
             "store_uri": f"file://{os.path.abspath(store)}",
             **identity,
             "seed": seed,
-            "sphere_radius_px": sphere_radius_px,
+            # Patch footprints in level-0 voxels (pixel units for now; see the NOTE
+            # in clustering.footprint for the move to physical units).
+            "footprint_units": "level0_voxels",
             "label_image": (
                 {"name": name, "path": label_path} if label_path else {"name": name}
             ),
@@ -105,6 +104,15 @@ def cluster_store(
             "locations_zyx": dict(
                 zip(loc.feature_ids, loc.centers_zyx.tolist(), strict=True)
             ),
+            "footprints": {
+                fid: {"origin_zyx": origin, "size_zyx": size}
+                for fid, origin, size in zip(
+                    loc.feature_ids,
+                    loc.footprints.origin_zyx.tolist(),
+                    loc.footprints.size_zyx.tolist(),
+                    strict=True,
+                )
+            },
         }
         json_path = f"{stem}.json"
         with open(json_path, "w", encoding="utf-8") as fh:

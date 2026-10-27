@@ -3,10 +3,15 @@
 The label image ``<image>/labels/<name>/`` mirrors the source multiscales: same axes,
 pyramid level count, per-level shapes (channel axis collapsed to 1), chunking and
 ``coordinateTransformations``, so it overlays the image at every resolution. Each
-embedded location is a sphere whose radius is ``radius_px`` at level 0 and
-``radius_px / downsample`` (per axis) at each coarser level, keeping its apparent size
-constant across the hierarchy. Only each sphere's bounding box is read/written, so
-whole-slide volumes are never materialised.
+embedded location is its patch footprint (``footprint``): an axis-aligned quad, one
+plane thick, covering exactly the level-0 voxels the embedding was computed from. A
+coarser level marks the voxels whose centres fall inside that area (level-0 extent /
+downsample per axis, so the apparent size is constant across the hierarchy), or the
+one voxel containing it when it is thinner than a level voxel (z). Only each quad's
+bounding box is written, so whole-slide volumes are never materialised.
+
+Footprints are in level-0 voxel units for now; see the NOTE in ``footprint`` for
+what changes when they move to physical units.
 """
 
 from __future__ import annotations
@@ -16,6 +21,8 @@ from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 import numpy as np
+
+from .footprint import Footprints
 
 SPATIAL = ("z", "y", "x")
 
@@ -101,15 +108,14 @@ def _levels(image, multiscales: dict, axes: list[str]) -> list[_Level]:
 def write_label_image(
     source_path: str,
     name: str,
-    centers_zyx: np.ndarray,
+    footprints: Footprints,
     clusters: np.ndarray,
     *,
-    radius_px: float = 16.0,
     expected_level0_wh: tuple[int, int] | None = None,
     overwrite: bool = False,
     extra_metadata: dict | None = None,
 ) -> str:
-    """Rasterise one sphere per location into ``<image>/labels/<name>``; return path."""
+    """Rasterise every footprint into ``<image>/labels/<name>``; return its path."""
     import zarr
 
     image, prefix, ome_key, ms = _open_image(source_path)
@@ -171,7 +177,7 @@ def write_label_image(
 
     spatial = [ax for ax in axes if ax in SPATIAL]  # in source axis order
     for lv, arr in zip(levels, arrays, strict=True):
-        _rasterise_level(arr, axes, spatial, lv, centers_zyx, clusters, radius_px)
+        _rasterise_level(arr, axes, spatial, lv, footprints, clusters)
 
     multiscales = {
         **{k: v for k, v in ms.items() if k not in ("datasets", "name")},
@@ -212,56 +218,96 @@ def write_label_image(
     return os.path.join(source_path, prefix, "labels", name)
 
 
-def _rasterise_level(arr, axes, spatial, lv: _Level, centers_zyx, clusters, r0):
-    """Stamp every location's sphere into one level; overlaps go to the nearest centre.
+def _level_boxes(lv: _Level, spatial, footprints: Footprints):
+    """Per-location ``[lo, hi)`` voxel ranges in one level, in ``spatial`` order.
 
-    In a level, a sphere has per-axis radius ``r0 / downsample``. Distances are
-    measured in those radius units, so a voxel inside several spheres takes the label
-    of the location it is (relatively) closest to - each location keeps its own centre
-    even when z-adjacent planes' spheres overlap. Ties go to the lower feature index.
+    Level voxel ``j`` has its centre at level-0 index ``(j - offset) * downsample``
+    and is kept when that lies in the footprint's ``[origin - 0.5, origin + size -
+    0.5)``. An extent thinner than one level voxel keeps the voxel containing its
+    middle, so a one-plane quad survives z downsampling.
+    """
+    origin = dict(zip(SPATIAL, footprints.origin_zyx.T.astype(np.float64), strict=True))
+    size = dict(zip(SPATIAL, footprints.size_zyx.T.astype(np.float64), strict=True))
+    lo, hi = [], []
+    for ax in spatial:
+        ds, off = lv.downsample[ax], lv.offset[ax]
+        a = origin[ax] - 0.5
+        b = a + size[ax]
+        lo_k = np.ceil(a / ds + off)
+        hi_k = np.ceil(b / ds + off)
+        thin = lo_k >= hi_k
+        mid = np.floor((a + b) / 2.0 / ds + off + 0.5)
+        lo_k = np.where(thin, mid, lo_k)
+        hi_k = np.where(thin, mid + 1, hi_k)
+        lo.append(lo_k)
+        hi.append(hi_k)
+    return np.stack(lo, 1).astype(np.int64), np.stack(hi, 1).astype(np.int64)
+
+
+def _rasterise_level(arr, axes, spatial, lv: _Level, footprints, clusters):
+    """Stamp every location's quad into one level; overlaps go to the nearest centre.
+
+    Grids with a stride below the patch side, or z planes merged by a coarser level,
+    make quads overlap. A contested voxel takes the location it is relatively closest
+    to (Euclidean distance in units of each box's half-extent, so equal boxes split
+    along their bisector), so every location keeps its own centre; ties go to the
+    lower feature index.
     """
     n = len(clusters)
     if n == 0:
         return
-    zyx = dict(zip(SPATIAL, np.asarray(centers_zyx, dtype=np.float64).T, strict=True))
-    c = np.stack(
-        [zyx[ax] / lv.downsample[ax] + lv.offset[ax] for ax in spatial], axis=1
-    )
-    r = np.asarray([r0 / lv.downsample[ax] for ax in spatial])
-    unit = c / r  # centres in radius units: overlapping spheres are < 2 apart
-    cells = np.floor(unit / 2.0).astype(np.int64)
+    extents = np.asarray([lv.shape[axes.index(ax)] for ax in spatial])
+    lo, hi = _level_boxes(lv, spatial, footprints)
+    centre = (lo + hi - 1) / 2.0
+    half = (hi - lo) / 2.0
+    lo, hi = np.maximum(lo, 0), np.minimum(hi, extents)
+    # Boxes that intersect have origins less than one (maximal) box apart.
+    cell_size = np.maximum((hi - lo).max(axis=0), 1)
+    cells = np.floor_divide(lo, cell_size)
     buckets: dict[tuple, list[int]] = {}
     for i, cell in enumerate(map(tuple, cells)):
         buckets.setdefault(cell, []).append(i)
-    offsets = np.stack(
+    neighbours = np.stack(
         np.meshgrid(*([(-1, 0, 1)] * len(spatial)), indexing="ij"), -1
     ).reshape(-1, len(spatial))
-    extents = [lv.shape[axes.index(ax)] for ax in spatial]
     for i in range(n):
-        lo = np.maximum(0, np.ceil(c[i] - r).astype(np.int64))
-        hi = np.minimum(extents, np.floor(c[i] + r).astype(np.int64) + 1)
-        if (lo >= hi).any():
-            continue  # sphere entirely outside this level
-        grids = np.meshgrid(
-            *(np.arange(a, b, dtype=np.float64) for a, b in zip(lo, hi, strict=True)),
-            indexing="ij",
-        )
-        d_own = sum(((g - c[i, k]) / r[k]) ** 2 for k, g in enumerate(grids))
-        keep = d_own <= 1.0
-        for off in offsets:
-            for j in buckets.get(tuple(cells[i] + off), ()):
-                if j == i:
-                    continue
-                d_j = sum(((g - c[j, k]) / r[k]) ** 2 for k, g in enumerate(grids))
-                keep &= (d_own < d_j) | ((d_own == d_j) & (i < j))
-        if not keep.any():
-            continue
+        if (lo[i] >= hi[i]).any():
+            continue  # outside this level
+        rivals = [
+            j
+            for off in neighbours
+            for j in buckets.get(tuple(cells[i] + off), ())
+            if j != i and (lo[j] < hi[i]).all() and (lo[i] < hi[j]).all()
+        ]
         index = tuple(
-            slice(int(lo[spatial.index(ax)]), int(hi[spatial.index(ax)]))
+            slice(int(lo[i, spatial.index(ax)]), int(hi[i, spatial.index(ax)]))
             if ax in spatial
             else 0
             for ax in axes
         )
+        if not rivals:
+            arr[index] = int(clusters[i])
+            continue
+        grids = np.meshgrid(
+            *(np.arange(a, b) for a, b in zip(lo[i], hi[i], strict=True)),
+            indexing="ij",
+        )
+
+        def dist(j: int, grids=grids) -> np.ndarray:
+            return sum(
+                ((g - centre[j, k]) / half[j, k]) ** 2 for k, g in enumerate(grids)
+            )
+
+        d_own = dist(i)
+        keep = np.ones(d_own.shape, dtype=bool)
+        for j in rivals:
+            inside = np.all(
+                [(g >= lo[j, k]) & (g < hi[j, k]) for k, g in enumerate(grids)], axis=0
+            )
+            d_j = np.where(inside, dist(j), np.inf)
+            keep &= (d_own < d_j) | ((d_own == d_j) & (i < j))
+        if not keep.any():
+            continue
         block = np.asarray(arr[index])
         block[keep] = int(clusters[i])
         arr[index] = block

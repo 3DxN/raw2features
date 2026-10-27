@@ -21,8 +21,9 @@ Notable changes to raw2features, newest first. This project follows
 - `raw2features sample --fluorescence --z N` writes a synthetic fluorescence z-stack.
 - `raw2features cluster` assigns each embedded location a trimodal-model cluster
   (placeholder inference for now) and writes per-model JSON (with embedding and
-  trimodal sha256), a binary glTF scene (one mesh per location, named by feature ID) and,
-  with `--write-labels`, an NGFF label image of resolution-scaled spheres in the source.
+  trimodal sha256), a binary glTF scene (one quad mesh per location, named by feature ID) and,
+  with `--write-labels`, an NGFF label image in the source. Each location is drawn as its patch footprint
+  (an axis-aligned quad covering exactly the embedded area, in level-0 pixel units).
 
 ## [0.2.1] - 2026-08-16
 

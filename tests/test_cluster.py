@@ -19,8 +19,6 @@ from raw2features.clustering.trimodal import PLACEHOLDER_TRIMODAL_SHA256
 from raw2features.core.falsecolor import PseudoHEParams
 from raw2features.pipeline.runner import RunConfig, embed_slide
 
-RADIUS = 16
-
 
 @pytest.fixture
 def embedded(tmp_path):
@@ -101,7 +99,7 @@ def test_trimodal_model_file_hash_is_recorded(embedded, tmp_path):
     assert tri["placeholder"] is False
 
 
-def test_label_image_mirrors_source_pyramid_with_scaled_spheres(embedded, tmp_path):
+def test_label_image_mirrors_source_pyramid_with_footprint_quads(embedded, tmp_path):
     import ngff_zarr
     import zarr
 
@@ -130,25 +128,30 @@ def test_label_image_mirrors_source_pyramid_with_scaled_spheres(embedded, tmp_pa
         assert out.metadata.dimension_separator == "/"
     ngff_zarr.from_ngff_zarr(f"{source}/labels/{name}")  # a valid NGFF image
 
-    levels = [np.asarray(lab[d["path"]][0, 0]) for d in src_ms["datasets"]]
-    for fid in record["feature_ids"]:
-        z, y, x = record["locations_zyx"][fid]
-        value = record["clusters"][fid]
-        for k, level in enumerate(levels):
-            ds, r = 2**k, RADIUS // 2**k  # radius 16 at level 0, 8 at level 1, ...
-            yl, xl = y // ds, x // ds
-            assert level[z, yl, xl] == value  # each location keeps its centre
-            assert level[z, yl, xl + r] != 0
-            assert level[z, yl, xl + r + 1] == 0
+    # Every level equals the footprints, side / downsample per x/y (non-overlapping
+    # dense grid, z not downsampled): exact size and position, background elsewhere.
+    sides = {tuple(f["size_zyx"]) for f in record["footprints"].values()}
+    (side,) = {s[1] for s in sides}
+    assert sides == {(1, side, side)} and side > 1
+    for k, d in enumerate(src_ms["datasets"]):
+        level = np.asarray(lab[d["path"]][0, 0])
+        ds = 2**k
+        expected = np.zeros_like(level)
+        for fid, foot in record["footprints"].items():
+            z, y0, x0 = foot["origin_zyx"]
+            assert record["locations_zyx"][fid] == [z, y0 + side // 2, x0 + side // 2]
+            ys = slice(-(-y0 // ds), -(-(y0 + side) // ds))  # centres inside the box
+            xs = slice(-(-x0 // ds), -(-(x0 + side) // ds))
+            assert ys.stop - ys.start == side // ds
+            expected[z, ys, xs] = record["clusters"][fid]
+        np.testing.assert_array_equal(level, expected)
 
 
 def test_label_name_collision_needs_overwrite(embedded, tmp_path):
     _source, store = embedded
     cluster_store(store, out_dir=str(tmp_path / "c"), write_labels=True, gltf=False)
     with pytest.raises(FileExistsError):
-        cluster_store(
-            store, out_dir=str(tmp_path / "c"), write_labels=True, gltf=False
-        )
+        cluster_store(store, out_dir=str(tmp_path / "c"), write_labels=True, gltf=False)
     cluster_store(
         store,
         out_dir=str(tmp_path / "c"),
@@ -183,12 +186,21 @@ def test_gltf_has_one_named_mesh_per_location(embedded, tmp_path):
     assert [n["name"] for n in doc["nodes"]] == ids
     assert [n["mesh"] for n in doc["nodes"]] == list(range(len(ids)))
     for node in doc["nodes"]:
-        z, y, x = record["locations_zyx"][node["name"]]
-        assert node["translation"] == [x, y, z]
+        foot = record["footprints"][node["name"]]
+        z, y0, x0 = foot["origin_zyx"]
+        _, h, w = foot["size_zyx"]
+        assert node["translation"] == [x0 + (w - 1) / 2, y0 + (h - 1) / 2, z]
+    # One shared quad: side x side in the z = 0 plane, double-sided.
+    (side,) = {f["size_zyx"][1] for f in record["footprints"].values()}
     pos = doc["accessors"][0]
-    assert pos["max"][0] == pytest.approx(RADIUS)
-    assert doc["asset"]["extras"]["embedding_sha256"] == (
-        record["embedding_model"]["sha256"]
+    assert pos["count"] == 4
+    assert pos["min"] == [-side / 2, -side / 2, 0.0]
+    assert pos["max"] == [side / 2, side / 2, 0.0]
+    assert {m["primitives"][0]["indices"] for m in doc["meshes"]} == {2}
+    assert doc["materials"] == [{"name": "footprint", "doubleSided": True}]
+    assert (
+        doc["asset"]["extras"]["embedding_sha256"]
+        == (record["embedding_model"]["sha256"])
     )
 
 
@@ -205,3 +217,29 @@ def test_cli_cluster(embedded, tmp_path):
     assert "mock:" in result.output
     assert (tmp_path / "c" / "s3d.mock.clusters.json").exists()
     assert (tmp_path / "c" / "s3d.mock.clusters.glb").exists()
+
+
+def test_overlapping_footprints_split_by_nearest_centre():
+    from raw2features.clustering.footprint import Footprints
+    from raw2features.clustering.labels import _Level, _rasterise_level
+
+    axes = ["z", "y", "x"]
+    # Two 8x8 patches with a stride of 4 on plane 0 and one on plane 1.
+    feet = Footprints(
+        np.asarray([[0, 0, 0], [0, 0, 4], [1, 0, 0]]), np.asarray([[1, 8, 8]] * 3)
+    )
+    clusters = np.asarray([7, 23, 5])
+    level0 = np.zeros((2, 8, 12), dtype=np.uint8)
+    lv = _Level("0", level0.shape, level0.shape, dict.fromkeys(axes, 1.0),
+                dict.fromkeys(axes, 0.0))  # fmt: skip
+    _rasterise_level(level0, axes, axes, lv, feet, clusters)
+    assert (level0[0, :, :6] == 7).all() and (level0[0, :, 6:] == 23).all()
+    assert (level0[1, :, :8] == 5).all() and (level0[1, :, 8:] == 0).all()
+
+    # z downsampled 2x: both planes fall into one level voxel; the quads still show
+    # and the tie at the shared z voxel goes by xy distance, then feature order.
+    coarse = np.zeros((1, 4, 6), dtype=np.uint8)
+    lv = _Level("1", coarse.shape, coarse.shape, dict.fromkeys(axes, 2.0),
+                dict.fromkeys(axes, 0.0))  # fmt: skip
+    _rasterise_level(coarse, axes, axes, lv, feet, clusters)
+    assert coarse[0, 0].tolist() == [7, 7, 7, 23, 23, 23]

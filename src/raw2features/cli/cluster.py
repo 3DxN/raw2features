@@ -25,8 +25,9 @@ def cluster(
     write_labels: bool = typer.Option(
         False,
         "--write-labels",
-        help="Write the clusters as an OME-Zarr label image (spheres) into the "
-        "source image under labels/clusters_<emb8>_<tri8>. Modifies the source.",
+        help="Write the clusters as an OME-Zarr label image (one patch-footprint "
+        "quad per location) into the source image under "
+        "labels/clusters_<emb8>_<tri8>. Modifies the source.",
     ),
     source: str | None = typer.Option(
         None,
@@ -38,19 +39,12 @@ def cluster(
         False, "--labels-overwrite", help="Replace an existing label of that name."
     ),
     gltf: bool = typer.Option(
-        True, "--gltf/--no-gltf", help="Write a .glb scene (one mesh per location)."
-    ),
-    sphere_radius: float = typer.Option(
-        16.0,
-        "--sphere-radius",
-        help="Sphere radius in level-0 px; halves with each 2x pyramid level.",
+        True, "--gltf/--no-gltf", help="Write a .glb scene (one quad per location)."
     ),
 ) -> None:
     """Assign each embedded location a cluster; write JSON, glTF and labels."""
     from raw2features.clustering import cluster_store
 
-    if sphere_radius <= 0:
-        raise typer.BadParameter("must be positive", param_hint="--sphere-radius")
     try:
         summaries = cluster_store(
             store,
@@ -62,7 +56,6 @@ def cluster(
             source=source,
             labels_overwrite=labels_overwrite,
             gltf=gltf,
-            sphere_radius_px=sphere_radius,
         )
     except (FileExistsError, KeyError, ValueError) as exc:
         typer.echo(redact_uri_credentials(f"Error: {exc}"), err=True)
