@@ -1,7 +1,7 @@
 """Plugin discovery for the swappable seams.
 
 Each seam (readers, segmenters, patchers, embedders, sinks, slide_embedders,
-multiplex_strategies)
+multiplex_strategies, clusterers)
 is resolved by name from two sources, in order:
 
 1. An in-process registry populated by the ``@register`` decorator (used by
@@ -30,6 +30,7 @@ SEAMS = (
     "sinks",
     "slide_embedders",
     "multiplex_strategies",
+    "clusterers",
 )
 
 

@@ -1,4 +1,4 @@
-"""``raw2features cluster`` - cluster stored embeddings with the trimodal model."""
+"""``raw2features cluster`` - cluster stored embeddings with a clusterer plugin."""
 
 from __future__ import annotations
 
@@ -15,13 +15,25 @@ def cluster(
     out_dir: str | None = typer.Option(
         None, "--out-dir", help="Where to write JSON/glTF (default: next to the store)."
     ),
-    trimodal_model: str | None = typer.Option(
-        None,
-        "--trimodal-model",
-        help="Trimodal model file; its sha256 is recorded. Default: a placeholder "
-        "identity (inference is currently a placeholder too).",
+    clusterer: str = typer.Option(
+        "trimodal",
+        "--clusterer",
+        help="Clusterer plugin (raw2features list clusterers).",
     ),
-    seed: int = typer.Option(0, "--seed", help="Seed for the placeholder inference."),
+    clusterer_model: str | None = typer.Option(
+        None,
+        "--clusterer-model",
+        "--trimodal-model",
+        help="Model file of the clusterer; its sha256 is recorded. Default: the "
+        "plugin's default (model.pt for trimodal).",
+    ),
+    clusterer_input: list[str] = typer.Option(
+        [],
+        "--clusterer-input",
+        help="Extra input for the clusterer as NAME=PATH (repeatable), e.g. another "
+        "modality.",
+    ),
+    seed: int = typer.Option(0, "--seed", help="Seed for the clusterer."),
     write_labels: bool = typer.Option(
         False,
         "--write-labels",
@@ -45,19 +57,35 @@ def cluster(
     """Assign each embedded location a cluster; write JSON, glTF and labels."""
     from raw2features.clustering import cluster_store
 
+    inputs = {}
+    for item in clusterer_input:
+        key, sep, value = item.partition("=")
+        if not sep or not key or not value:
+            raise typer.BadParameter(
+                f"expected NAME=PATH, got {item!r}", param_hint="--clusterer-input"
+            )
+        inputs[key] = value
     try:
         summaries = cluster_store(
             store,
             models=list(model) or None,
             out_dir=out_dir,
-            trimodal_model=trimodal_model,
+            clusterer=clusterer,
+            clusterer_model=clusterer_model,
+            clusterer_inputs=inputs,
             seed=seed,
             write_labels=write_labels,
             source=source,
             labels_overwrite=labels_overwrite,
             gltf=gltf,
         )
-    except (FileExistsError, KeyError, ValueError) as exc:
+    except (
+        FileExistsError,
+        FileNotFoundError,
+        ImportError,
+        KeyError,
+        ValueError,
+    ) as exc:
         typer.echo(redact_uri_credentials(f"Error: {exc}"), err=True)
         raise typer.Exit(1) from exc
     for s in summaries:

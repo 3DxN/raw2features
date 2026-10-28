@@ -1,4 +1,4 @@
-"""``raw2features cluster``: placeholder trimodal clustering -> JSON, labels, glTF."""
+"""``raw2features cluster``: clusterer plugins -> JSON, labels, glTF."""
 
 from __future__ import annotations
 
@@ -13,9 +13,13 @@ import pytest
 pytest.importorskip("zarr")
 pytest.importorskip("torch")
 from conftest import MockEmbedder
-from raw2features.clustering import cluster_store
+from raw2features.clustering import ClusterContext, Clusterer, cluster_store
+from raw2features.clustering.base import ClustererIdentity
 from raw2features.clustering.labels import label_name, local_source_path
-from raw2features.clustering.trimodal import PLACEHOLDER_TRIMODAL_SHA256
+from raw2features.clustering.trimodal import (
+    PLACEHOLDER_TRIMODAL_SHA256,
+    TrimodalClusterer,
+)
 from raw2features.core.falsecolor import PseudoHEParams
 from raw2features.pipeline.runner import RunConfig, embed_slide
 
@@ -55,11 +59,15 @@ def _load(summary) -> dict:
         return json.load(fh)
 
 
-def test_json_assigns_one_placeholder_cluster_per_location(embedded, tmp_path):
+def test_json_assigns_one_placeholder_cluster_per_location(
+    embedded, tmp_path, monkeypatch
+):
     from raw2features.core.store import GRIDS, grid_keys, open_root
 
     _source, store = embedded
-    (summary,) = cluster_store(store, out_dir=str(tmp_path / "c"), gltf=False)
+    monkeypatch.chdir(tmp_path)  # no model.pt here: placeholder identity, warned
+    with pytest.warns(UserWarning, match="model.pt"):
+        (summary,) = cluster_store(store, out_dir=str(tmp_path / "c"), gltf=False)
     record = _load(summary)
 
     root = open_root(store)
@@ -72,10 +80,14 @@ def test_json_assigns_one_placeholder_cluster_per_location(embedded, tmp_path):
     assert len({k.split("/")[0] for k in expected}) == 3  # all z planes
     assert set(record["clusters"]) == set(expected)
     assert set(record["clusters"].values()) <= {7, 23}
-    assert record["trimodal_model"] == {
+    tri = record["clustering_model"]
+    assert tri.pop("version")
+    assert tri == {
+        "plugin": "trimodal",
         "sha256": PLACEHOLDER_TRIMODAL_SHA256,
         "path": None,
         "placeholder": True,
+        "inputs": {},
     }
     emb = record["embedding_model"]
     assert emb["name"] == "mock" and len(emb["sha256"]) == 64
@@ -83,20 +95,93 @@ def test_json_assigns_one_placeholder_cluster_per_location(embedded, tmp_path):
         emb["sha256"], PLACEHOLDER_TRIMODAL_SHA256
     )
     # Deterministic for a fixed seed.
-    (again,) = cluster_store(store, out_dir=str(tmp_path / "d"), gltf=False)
+    (again,) = cluster_store(
+        store, out_dir=str(tmp_path / "d"), clusterer="placeholder", gltf=False
+    )
     assert _load(again)["clusters"] == record["clusters"]
 
 
-def test_trimodal_model_file_hash_is_recorded(embedded, tmp_path):
+def test_trimodal_model_file_hash_is_recorded(embedded, tmp_path, monkeypatch):
     _source, store = embedded
     model = tmp_path / "trimodal.pt"
     model.write_bytes(b"trimodal weights")
     (summary,) = cluster_store(
-        store, out_dir=str(tmp_path / "c"), trimodal_model=str(model), gltf=False
+        store, out_dir=str(tmp_path / "c"), clusterer_model=str(model), gltf=False
     )
-    tri = _load(summary)["trimodal_model"]
+    tri = _load(summary)["clustering_model"]
     assert tri["sha256"] == hashlib.sha256(b"trimodal weights").hexdigest()
-    assert tri["placeholder"] is False
+    assert tri["path"] == str(model)
+    assert tri["placeholder"] is True  # inference itself is still a placeholder
+    assert summary["labels"] is None
+
+    # The default model file is model.pt in the working directory.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "model.pt").write_bytes(b"default weights")
+    ident = TrimodalClusterer().identity()
+    assert ident.model_path == str(tmp_path / "model.pt")
+    assert ident.model_sha256 == hashlib.sha256(b"default weights").hexdigest()
+
+    with pytest.raises(FileNotFoundError):
+        TrimodalClusterer(str(tmp_path / "missing.pt")).load()
+
+
+class _RecordingClusterer(Clusterer):
+    name = "recording"
+
+    def __init__(self, model_file=None, value=3):
+        super().__init__(model_file)
+        self.value, self.calls, self.loaded = value, [], 0
+
+    def load(self):
+        self.loaded += 1
+
+    def identity(self):
+        return ClustererIdentity("recording", "1.0", "ab" * 32, None)
+
+    def predict(self, features, context: ClusterContext):
+        self.calls.append((np.asarray(features).shape, context))
+        return np.full(len(features), self.value)
+
+
+class _ZeroClusterer(_RecordingClusterer):
+    def __init__(self, model_file=None):
+        super().__init__(model_file, value=0)
+
+
+def test_plugin_contract(embedded, tmp_path, monkeypatch):
+    from raw2features.core import plugins
+
+    _source, store = embedded
+    engine = _RecordingClusterer()
+    (summary,) = cluster_store(
+        store,
+        out_dir=str(tmp_path / "c"),
+        clusterer=engine,
+        clusterer_inputs={"rna": "/data/rna.h5ad"},
+        seed=5,
+        gltf=False,
+    )
+    record = _load(summary)
+    # Loaded once; one predict call with every location of the slide (all z planes).
+    assert engine.loaded == 1
+    ((shape, ctx),) = engine.calls
+    assert shape[0] == len(record["feature_ids"])
+    assert ctx.feature_ids == record["feature_ids"] and ctx.seed == 5
+    assert ctx.inputs == {"rna": "/data/rna.h5ad"} and ctx.embedding_model == "mock"
+    assert ctx.footprints.origin_zyx.shape == (shape[0], 3)
+    np.testing.assert_array_equal(
+        ctx.other_features("mock").shape, (shape[0], shape[1])
+    )
+    assert set(record["clusters"].values()) == {3}
+    assert record["clustering_model"]["plugin"] == "recording"
+    assert record["label_image"]["name"].endswith("_abababab")
+
+    # Resolved by name, as an entry point would be; 0 (background) is rejected.
+    registry = plugins._REGISTRY.setdefault("clusterers", {})
+    monkeypatch.setitem(registry, "zero", _ZeroClusterer)
+    with pytest.raises(ValueError, match=">= 1"):
+        cluster_store(store, out_dir=str(tmp_path / "z"), clusterer="zero")
+    assert {"trimodal", "placeholder", "zero"} <= set(plugins.available("clusterers"))
 
 
 def test_label_image_mirrors_source_pyramid_with_footprint_quads(embedded, tmp_path):
@@ -108,7 +193,9 @@ def test_label_image_mirrors_source_pyramid_with_footprint_quads(embedded, tmp_p
     image.require_group("labels").attrs["labels"] = ["existing"]
     image["labels"].require_group("existing")
 
-    (summary,) = cluster_store(store, out_dir=str(tmp_path / "c"), write_labels=True)
+    (summary,) = cluster_store(
+        store, out_dir=str(tmp_path / "c"), clusterer="placeholder", write_labels=True
+    )
     record = _load(summary)
     name = record["label_image"]["name"]
     assert name.startswith("clusters_") and len(name.split("_")[1]) == 8
@@ -149,11 +236,13 @@ def test_label_image_mirrors_source_pyramid_with_footprint_quads(embedded, tmp_p
 
 def test_label_name_collision_needs_overwrite(embedded, tmp_path):
     _source, store = embedded
-    cluster_store(store, out_dir=str(tmp_path / "c"), write_labels=True, gltf=False)
+    kw = {"clusterer": "placeholder", "gltf": False}
+    cluster_store(store, out_dir=str(tmp_path / "c"), write_labels=True, **kw)
     with pytest.raises(FileExistsError):
-        cluster_store(store, out_dir=str(tmp_path / "c"), write_labels=True, gltf=False)
+        cluster_store(store, out_dir=str(tmp_path / "c"), write_labels=True, **kw)
     cluster_store(
         store,
+        clusterer="placeholder",
         out_dir=str(tmp_path / "c"),
         write_labels=True,
         labels_overwrite=True,
@@ -178,7 +267,9 @@ def _read_glb(path: str) -> dict:
 
 def test_gltf_has_one_named_mesh_per_location(embedded, tmp_path):
     _source, store = embedded
-    (summary,) = cluster_store(store, out_dir=str(tmp_path / "c"))
+    (summary,) = cluster_store(
+        store, out_dir=str(tmp_path / "c"), clusterer="placeholder"
+    )
     record = _load(summary)
     doc = _read_glb(summary["gltf"])
     ids = record["feature_ids"]
@@ -211,12 +302,28 @@ def test_cli_cluster(embedded, tmp_path):
 
     _source, store = embedded
     result = CliRunner().invoke(
-        app, ["cluster", store, "--out-dir", str(tmp_path / "c"), "--seed", "3"]
+        app,
+        [
+            "cluster",
+            store,
+            "--out-dir",
+            str(tmp_path / "c"),
+            "--seed",
+            "3",
+            "--clusterer",
+            "placeholder",
+            "--clusterer-input",
+            "rna=/data/rna.h5ad",
+        ],
     )
     assert result.exit_code == 0, result.output
     assert "mock:" in result.output
-    assert (tmp_path / "c" / "s3d.mock.clusters.json").exists()
+    record = json.loads((tmp_path / "c" / "s3d.mock.clusters.json").read_text())
+    assert record["clustering_model"]["plugin"] == "placeholder"
+    assert record["clustering_model"]["inputs"] == {"rna": "/data/rna.h5ad"}
     assert (tmp_path / "c" / "s3d.mock.clusters.glb").exists()
+    bad = CliRunner().invoke(app, ["cluster", store, "--clusterer-input", "rna"])
+    assert bad.exit_code != 0
 
 
 def test_overlapping_footprints_split_by_nearest_centre():

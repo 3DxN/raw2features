@@ -7,9 +7,12 @@ import os
 
 import numpy as np
 
+from raw2features.core import plugins
+
+from . import trimodal  # noqa: F401 - registers the built-in clusterers
+from .base import ClusterContext, Clusterer, check_clusters
 from .collect import collect_locations, store_models
 from .labels import label_name, local_source_path, write_label_image
-from .trimodal import predict_clusters, resolve_trimodal_sha256
 
 CLUSTERS_FORMAT = "raw2features-clusters/0.2"
 
@@ -19,29 +22,54 @@ def cluster_store(
     *,
     models: list[str] | None = None,
     out_dir: str | None = None,
-    trimodal_model: str | None = None,
+    clusterer: str | Clusterer = "trimodal",
+    clusterer_model: str | None = None,
+    clusterer_inputs: dict[str, str] | None = None,
     seed: int = 0,
     write_labels: bool = False,
     source: str | None = None,
     labels_overwrite: bool = False,
     gltf: bool = True,
 ) -> list[dict]:
-    """Cluster each model's locations; return one summary per model."""
+    """Cluster each model's locations; return one summary per model.
+
+    ``clusterer`` is a registered ``raw2features.clusterers`` name (constructed with
+    ``clusterer_model``, ``None`` = its default model file) or an instance.
+    """
     from .gltf import write_glb
 
     store = os.path.normpath(store)
     out_dir = out_dir or os.path.dirname(os.path.abspath(store))
     os.makedirs(out_dir, exist_ok=True)
-    trimodal_sha, placeholder = resolve_trimodal_sha256(trimodal_model)
-    rng = np.random.default_rng(seed)
+    engine = (
+        clusterer
+        if isinstance(clusterer, Clusterer)
+        else plugins.get("clusterers", clusterer)(clusterer_model)
+    )
+    engine.load()
+    ident = engine.identity()
     summaries = []
     for model in models or store_models(store):
         loc = collect_locations(store, model)
-        clusters = np.concatenate(
-            [predict_clusters(np.asarray(f), rng) for _key, f in loc.features]
-            or [np.zeros(0, dtype=np.int32)]
-        ).astype(np.int64)
-        name = label_name(loc.sha256, trimodal_sha)
+        features = np.concatenate([np.asarray(f) for _key, f in loc.features])
+        context = ClusterContext(
+            slide_id=loc.slide_id,
+            store=store,
+            source_uri=loc.source_uri,
+            embedding_model=model,
+            embedding_sha256=loc.sha256,
+            feature_ids=loc.feature_ids,
+            footprints=loc.footprints,
+            scale_um=loc.scale_um,
+            seed=seed,
+            inputs=dict(clusterer_inputs or {}),
+        )
+        clusters = check_clusters(
+            engine.predict(features, context),
+            len(loc.feature_ids),
+            plugin=ident.plugin,
+        )
+        name = label_name(loc.sha256, ident.model_sha256)
         stem = os.path.join(out_dir, f"{loc.slide_id}.{model}.clusters")
         identity = {
             "embedding_model": {
@@ -50,10 +78,13 @@ def cluster_store(
                 "sha256_kind": loc.sha256_kind,
                 "output_fingerprint": loc.output_fingerprint,
             },
-            "trimodal_model": {
-                "sha256": trimodal_sha,
-                "path": os.path.abspath(trimodal_model) if trimodal_model else None,
-                "placeholder": placeholder,
+            "clustering_model": {
+                "plugin": ident.plugin,
+                "version": ident.version,
+                "sha256": ident.model_sha256,
+                "path": ident.model_path,
+                "placeholder": ident.placeholder,
+                "inputs": dict(clusterer_inputs or {}),
             },
         }
 
@@ -78,7 +109,7 @@ def cluster_store(
                 extras={
                     "scale_um": loc.scale_um,
                     "embedding_sha256": loc.sha256,
-                    "trimodal_sha256": trimodal_sha,
+                    "clustering_sha256": ident.model_sha256,
                 },
             )
 

@@ -1,8 +1,9 @@
 """raw2features - read OME-Zarr WSIs and emit patch-level FM embeddings.
 
 The storage backend (reader) and model implementation are independently swappable
-via seven plugin seams: readers, segmenters, patchers, embedders, sinks,
-slide_embedders, and multiplex_strategies (see ``raw2features.core.plugins.SEAMS``).
+via eight plugin seams: readers, segmenters, patchers, embedders, sinks,
+slide_embedders, multiplex_strategies and clusterers (see
+``raw2features.core.plugins.SEAMS``).
 Third parties add an
 implementation through the matching ``raw2features.<seam>`` entry-point group.
 For embedders, that entry point is a loader family used by the packaged model
