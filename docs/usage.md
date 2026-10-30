@@ -46,7 +46,8 @@ OME-Zarr  ──reader──▶  segmenter ──▶  patcher ──▶  embedde
 | **sink** | `zarr` | writes `coords`/`grid_index`/`mask`/`features/<model>` + provenance |
 
 List what's installed for any component: `raw2features list embedders` (or `readers`,
-`segmenters`, `patchers`, `sinks`, `slide_embedders`, `multiplex_strategies`).
+`segmenters`, `patchers`, `sinks`, `slide_embedders`, `multiplex_strategies`,
+`clusterers`).
 
 ---
 
@@ -77,7 +78,7 @@ on another (e.g. an x86 cluster). Verify with `raw2features version`.
 | `raw2features export-h5 <store.embeddings.zarr> <out_dir>` | export features to HDF5 (one `.h5` per model); needs the `[h5]` extra |
 | `raw2features validate-store <store.embeddings.zarr>` | check a store conforms to the embeddings-store spec |
 | `raw2features models` | list the model registry (name, dim, gated, source) |
-| `raw2features list <component>` | list installed plugins for a component type (readers, segmenters, patchers, embedders, sinks, slide_embedders, multiplex_strategies) |
+| `raw2features list <component>` | list installed plugins for a component type (readers, segmenters, patchers, embedders, sinks, slide_embedders, multiplex_strategies, clusterers) |
 | `raw2features version` | print the version |
 
 Every option below is also visible via `raw2features <command> --help`.
@@ -652,6 +653,69 @@ Inline (`--emit-thumbnail`) also records the thumbnail metadata in the store's
 `.zattrs` (`raw2features.thumbnail`).
 
 ---
+
+### `cluster` - clustering → JSON, OME-Zarr labels, glTF
+
+```bash
+raw2features cluster out/slide.embeddings.zarr [-m uni2_h] [--clusterer trimodal] \
+    [--clusterer-model model.pt] [--clusterer-input NAME=PATH ...] \
+    [--write-labels] [--no-gltf] [--seed 0]
+```
+
+Assigns every embedded location (all grids, i.e. all z planes) of each model one
+positive integer cluster, using a **clusterer plugin** (`raw2features list
+clusterers`; built-ins `trimodal` - the default - and `placeholder`). `trimodal` reads
+its model from `--clusterer-model`, default `model.pt` in the working directory, and
+records the file's sha256. **Its inference is currently a placeholder** (a seeded
+random choice of 7 or 23, flagged `placeholder: true`); without a model file it records
+a placeholder hash and warns. `--clusterer-input NAME=PATH` passes extra inputs (e.g.
+another modality) to the plugin. Locations are addressed by **feature ID** `<grid_key>/<row>` (e.g.
+`mpp0.5_px224_z1/17` = row 17 of `grids/mpp0.5_px224_z1/features/<model>`).
+
+Each location is drawn as its **patch footprint**: the axis-aligned square of
+`patching.level0_patch` level-0 pixels starting at its `coords` (top-left), on its
+plane `z` - exactly the area the embedding was computed from, in size and
+orientation. Footprints are in level-0 **pixel units** for now (a move to µm is
+planned; see `clustering/footprint.py`). Per model it writes:
+
+- `<slide>.<model>.clusters.json` - `clusters`, `locations_zyx` (centre voxel) and
+  `footprints` (`origin_zyx` = first voxel, `size_zyx` = `[1, side, side]`) keyed by
+  feature ID, `feature_ids` (the glTF mesh order), `clustering_model` (plugin,
+  version, model sha256/path, placeholder flag, inputs), and both models' sha256
+  (`embedding_model.sha256` is the pinned `weights_sha256`, or the output fingerprint
+  for models without one - see `sha256_kind`).
+- `<slide>.<model>.clusters.glb` - binary glTF scene with one quad mesh per location;
+  mesh *i*, node *i* and their `name` / `extras.feature_id` are the *i*-th feature ID.
+  Node `translation` is the footprint centre `(x, y, z)` in level-0 voxels (voxel
+  centres at integer indices, so a quad spans `x0 - 0.5 .. x0 + side - 0.5`); the
+  quad lies in the z plane with edges along x/y and a double-sided material. Colour
+  by joining the JSON `clusters` on feature ID.
+- `--write-labels` - an NGFF label image in the **source** OME-Zarr at
+  `labels/clusters_<last 8 of embedding sha>_<last 8 of clustering model sha>/` (the
+  `labels` listing is appended to), mirroring the image's axes, pyramid, chunking and
+  transforms with `c=1`. Each footprint covers its `side x side` voxels on its plane
+  at level 0 and `side / downsample` at coarser levels (32 at a 2x level for a
+  64 px patch), so its apparent size is constant; a plane merged by z downsampling
+  keeps the voxel containing it. Where footprints overlap (a stride below the patch
+  side, or merged planes) a voxel takes the nearest location's cluster, so every
+  location keeps its own centre. Only local sources can be written (`--source` for a
+  local copy).
+
+**Writing a clusterer.** Subclass `raw2features.clustering.Clusterer`
+(`clustering/base.py` documents the contract) and register it in your package:
+
+```toml
+[project.entry-points."raw2features.clusterers"]
+mymodel = "my_package.plugin:MyClusterer"
+```
+
+`load()` imports heavy dependencies and the model once; `identity()` returns the model
+sha256 and version; `predict(features, context)` is called once per slide and
+embedding model with every location's features `(N, D)` and a `ClusterContext`
+(feature IDs, footprints, µm scale, seed, `--clusterer-input`s, and
+`other_features(model)` for another model's embeddings at the same locations). It
+returns `(N,)` integers `>= 1` (0 is the label background); raw2features writes all
+outputs.
 
 ## 9. Cohort runs on SLURM
 

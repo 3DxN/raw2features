@@ -104,6 +104,11 @@ gigapath_flash_slide = "raw2features.slide_embedders.gigapath_slide:GigapathSlid
 chief = "raw2features.slide_embedders.chief:CHIEFSlideEmbedder"
 tangle = "raw2features.slide_embedders.tangle:TangleSlideEmbedder"
 
+# Clustering engines for `raw2features cluster --clusterer <name>` (clustering/base.py).
+[project.entry-points."raw2features.clusterers"]
+trimodal = "raw2features.clustering.trimodal:TrimodalClusterer"
+placeholder = "raw2features.clustering.trimodal:PlaceholderClusterer"
+
 [project.optional-dependencies]
 # Convenience bundle: the general OME-Zarr, image, torch, and model stack in one install
 # - `pip install "raw2features[all]"`. Special/gated model stacks (including
@@ -136,6 +141,9 @@ models = ["timm>=1.0", "huggingface-hub>=0.24", "einops>=0.7", "transformers>=4.
 # Each extra pulls the torch+models stack the encoder needs so the post-install git
 # package finds its build/runtime deps already present.
 conch = ["raw2features[torch,models]"]
+# Trimodal clusterer (clustering/trimodal.py). TODO: list its spatial-transcriptomics
+# packages here once specified; they are imported lazily in TrimodalClusterer.load().
+trimodal = ["raw2features[zarr]"]
 # Hibou (HistAI): its trust_remote_code modeling imports the removed transformers.onnx,
 # so it needs transformers<5. Opt-in so it never constrains the default install.
 hibou = ["transformers<5"]

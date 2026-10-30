@@ -115,6 +115,15 @@ def pin_source(source: str, revision: str | None) -> str:
     return source
 
 
+def sha256_file(path: str) -> str:
+    """Hex sha256 of a file, read in 1 MiB chunks (multi-GB safe)."""
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def verify_sha256(path: str, expected: str | None, *, what: str) -> None:
     """Raise ``ValueError`` if the file at ``path`` doesn't match ``expected``.
 
@@ -123,11 +132,7 @@ def verify_sha256(path: str, expected: str | None, *, what: str) -> None:
     """
     if not expected:
         return
-    h = hashlib.sha256()
-    with open(path, "rb") as fh:
-        for chunk in iter(lambda: fh.read(1 << 20), b""):
-            h.update(chunk)
-    got = h.hexdigest()
+    got = sha256_file(path)
     if got != expected:
         raise ValueError(
             f"{what}: downloaded weight file sha256 {got} does not match the "
