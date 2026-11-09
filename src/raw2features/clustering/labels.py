@@ -1,14 +1,15 @@
 """Write cluster results into the source OME-Zarr as an NGFF label image.
 
-The label image ``<image>/labels/<name>/`` mirrors the source multiscales: same axes,
-pyramid level count, per-level shapes (channel axis collapsed to 1), chunking and
-``coordinateTransformations``, so it overlays the image at every resolution. Each
-embedded location is its patch footprint (``footprint``): an axis-aligned quad, one
-plane thick, covering exactly the level-0 voxels the embedding was computed from. A
-coarser level marks the voxels whose centres fall inside that area (level-0 extent /
-downsample per axis, so the apparent size is constant across the hierarchy), or the
-one voxel containing it when it is thinner than a level voxel (z). Only each quad's
-bounding box is written, so whole-slide volumes are never materialised.
+The label image ``<image>/labels/<name>/`` mirrors the source multiscales without its
+channel axis: same other axes, pyramid level count, per-level shapes, chunking and
+``coordinateTransformations``, so it overlays the image at every resolution. A time
+axis keeps its length but only ``t = 0`` is written. Each embedded location is its
+patch footprint (``footprint``): an axis-aligned quad, one plane thick, covering
+exactly the level-0 voxels the embedding was computed from. A coarser level marks the
+voxels whose centres fall inside that area (level-0 extent / downsample per axis, so
+the apparent size is constant across the hierarchy), or the one voxel containing it
+when it is thinner than a level voxel (z). Only each quad's bounding box is written,
+so whole-slide volumes are never materialised.
 
 Footprints are in level-0 voxel units for now; see the NOTE in ``footprint`` for
 what changes when they move to physical units.
@@ -17,7 +18,7 @@ what changes when they move to physical units.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from urllib.parse import urlsplit
 
 import numpy as np
@@ -105,6 +106,31 @@ def _levels(image, multiscales: dict, axes: list[str]) -> list[_Level]:
     return levels
 
 
+def _is_channel(axis) -> bool:
+    """NGFF marks a channel axis by ``type``; the name ``c`` covers untyped metadata."""
+    if isinstance(axis, dict):
+        return axis.get("type") == "channel" or axis.get("name") == "c"
+    return str(axis) == "c"
+
+
+def _select_transforms(node: dict, keep: list[int]) -> dict:
+    """``node`` with its ``coordinateTransformations`` reduced to the ``keep`` axes."""
+    if "coordinateTransformations" not in node:
+        return node
+    transforms = [
+        {
+            **t,
+            **{
+                kind: [t[kind][i] for i in keep]
+                for kind in ("scale", "translation")
+                if kind in t
+            },
+        }
+        for t in node["coordinateTransformations"]
+    ]
+    return {**node, "coordinateTransformations": transforms}
+
+
 def write_label_image(
     source_path: str,
     name: str,
@@ -152,38 +178,47 @@ def write_label_image(
     dtype = next(
         t for t in ("uint8", "uint16", "uint32") if max_value <= np.iinfo(t).max
     )
-    c_index = axes.index("c") if "c" in axes else None
+    keep = [i for i, axis in enumerate(ms["axes"]) if not _is_channel(axis)]
+    label_axes = [axes[i] for i in keep]
+    levels = [
+        replace(
+            lv,
+            shape=tuple(lv.shape[i] for i in keep),
+            chunks=tuple(lv.chunks[i] for i in keep),
+        )
+        for lv in levels
+    ]
     arrays = []
     for lv in levels:
-        shape = list(lv.shape)
-        chunks = list(lv.chunks)
-        if c_index is not None:
-            shape[c_index] = chunks[c_index] = 1
         kwargs: dict = {}
         if zarr_format == 2:
             kwargs["chunk_key_encoding"] = {"name": "v2", "separator": "/"}
         else:
-            kwargs["dimension_names"] = axes
+            kwargs["dimension_names"] = label_axes
         arrays.append(
             group.create_array(
                 lv.path,
-                shape=tuple(shape),
-                chunks=tuple(chunks),
+                shape=lv.shape,
+                chunks=lv.chunks,
                 dtype=dtype,
                 fill_value=0,
                 **kwargs,
             )
         )
 
-    spatial = [ax for ax in axes if ax in SPATIAL]  # in source axis order
+    spatial = [ax for ax in label_axes if ax in SPATIAL]  # in source axis order
     for lv, arr in zip(levels, arrays, strict=True):
-        _rasterise_level(arr, axes, spatial, lv, footprints, clusters)
+        _rasterise_level(arr, label_axes, spatial, lv, footprints, clusters)
 
-    multiscales = {
-        **{k: v for k, v in ms.items() if k not in ("datasets", "name")},
-        "name": name,
-        "datasets": ms["datasets"],
-    }
+    multiscales = _select_transforms(
+        {
+            **{k: v for k, v in ms.items() if k not in ("axes", "datasets", "name")},
+            "name": name,
+            "axes": [ms["axes"][i] for i in keep],
+            "datasets": [_select_transforms(d, keep) for d in ms["datasets"]],
+        },
+        keep,
+    )
     colors = [
         {"label-value": int(v)} for v in sorted({int(c) for c in clusters.tolist()})
     ]

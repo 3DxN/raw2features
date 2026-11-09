@@ -692,14 +692,18 @@ planned; see `clustering/footprint.py`). Per model it writes:
   by joining the JSON `clusters` on feature ID.
 - `--write-labels` - an NGFF label image in the **source** OME-Zarr at
   `labels/clusters_<last 8 of embedding sha>_<last 8 of clustering model sha>/` (the
-  `labels` listing is appended to), mirroring the image's axes, pyramid, chunking and
-  transforms with `c=1`. Each footprint covers its `side x side` voxels on its plane
+  `labels` listing is appended to), mirroring the image's pyramid, chunking, transforms
+  and axes except the channel axis, which is removed (`tczyx` gives `tzyx`, `cyx` gives
+  `yx`). A time axis keeps its length, but only `t = 0` is written, so later timepoints
+  are empty. Each footprint covers its `side x side` voxels on its plane
   at level 0 and `side / downsample` at coarser levels (32 at a 2x level for a
   64 px patch), so its apparent size is constant; a plane merged by z downsampling
   keeps the voxel containing it. Where footprints overlap (a stride below the patch
   side, or merged planes) a voxel takes the nearest location's cluster, so every
   location keeps its own centre. Only local sources can be written (`--source` for a
-  local copy).
+  local copy). The `image-label.colors` entries list only `label-value`, with no
+  `rgba` display colour: NGFF makes `rgba` optional, but `ome-zarr-models` 1.7 rejects
+  entries without it.
 
 **Writing a clusterer.** Subclass `raw2features.clustering.Clusterer`
 (`clustering/base.py` documents the contract) and register it in your package:

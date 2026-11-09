@@ -15,7 +15,12 @@ pytest.importorskip("torch")
 from conftest import MockEmbedder
 from raw2features.clustering import ClusterContext, Clusterer, cluster_store
 from raw2features.clustering.base import ClustererIdentity
-from raw2features.clustering.labels import label_name, local_source_path
+from raw2features.clustering.footprint import Footprints
+from raw2features.clustering.labels import (
+    label_name,
+    local_source_path,
+    write_label_image,
+)
 from raw2features.clustering.trimodal import (
     PLACEHOLDER_TRIMODAL_SHA256,
     TrimodalClusterer,
@@ -207,11 +212,17 @@ def test_label_image_mirrors_source_pyramid_with_footprint_quads(embedded, tmp_p
     attrs = dict(lab.attrs)
     assert attrs["image-label"]["source"] == {"image": "../../"}
     src_ms = dict(image.attrs)["multiscales"][0]
-    assert attrs["multiscales"][0]["datasets"] == src_ms["datasets"]
-    for ds in src_ms["datasets"]:
+    assert [a["name"] for a in attrs["multiscales"][0]["axes"]] == ["t", "z", "y", "x"]
+    for ds, out_ds in zip(
+        src_ms["datasets"], attrs["multiscales"][0]["datasets"], strict=True
+    ):
+        assert out_ds["path"] == ds["path"]
+        src_scale = ds["coordinateTransformations"][0]["scale"]
+        out_scale = out_ds["coordinateTransformations"][0]["scale"]
+        assert out_scale == [src_scale[0], *src_scale[2:]]
         src, out = image[ds["path"]], lab[ds["path"]]
-        assert out.shape == (1, 1, *src.shape[2:])
-        assert out.chunks == (1, 1, *src.chunks[2:])
+        assert out.shape == (src.shape[0], *src.shape[2:])
+        assert out.chunks == (src.chunks[0], *src.chunks[2:])
         assert out.metadata.dimension_separator == "/"
     ngff_zarr.from_ngff_zarr(f"{source}/labels/{name}")  # a valid NGFF image
 
@@ -221,7 +232,7 @@ def test_label_image_mirrors_source_pyramid_with_footprint_quads(embedded, tmp_p
     (side,) = {s[1] for s in sides}
     assert sides == {(1, side, side)} and side > 1
     for k, d in enumerate(src_ms["datasets"]):
-        level = np.asarray(lab[d["path"]][0, 0])
+        level = np.asarray(lab[d["path"]][0])
         ds = 2**k
         expected = np.zeros_like(level)
         for fid, foot in record["footprints"].items():
@@ -232,6 +243,108 @@ def test_label_image_mirrors_source_pyramid_with_footprint_quads(embedded, tmp_p
             assert ys.stop - ys.start == side // ds
             expected[z, ys, xs] = record["clusters"][fid]
         np.testing.assert_array_equal(level, expected)
+
+
+def _write_ngff_source(path, axes, shape, version, global_scale=None):
+    """A two-level image with per-axis scales and translations."""
+    import zarr
+
+    zarr_format = 2 if version == "0.4" else 3
+    root = zarr.open_group(path, mode="w", zarr_format=zarr_format)
+    types = {"t": "time", "c": "channel", "ch": "channel"}
+    datasets = []
+    for k in range(2):
+        factors = [2**k if a in ("y", "x") else 1 for a in axes]
+        level = tuple(s // f for s, f in zip(shape, factors, strict=True))
+        kwargs = {"dimension_names": axes} if zarr_format == 3 else {}
+        root.create_array(str(k), shape=level, chunks=level, dtype="uint16", **kwargs)
+        datasets.append(
+            {
+                "path": str(k),
+                "coordinateTransformations": [
+                    {"type": "scale", "scale": [float(f) for f in factors]},
+                    {"type": "translation", "translation": [0.0] * len(axes)},
+                ],
+            }
+        )
+    multiscales = {
+        "name": "source",
+        "axes": [{"name": a, "type": types.get(a, "space")} for a in axes],
+        "datasets": datasets,
+    }
+    if global_scale is not None:
+        multiscales["coordinateTransformations"] = [
+            {"type": "scale", "scale": global_scale}
+        ]
+    if version == "0.4":
+        root.attrs["multiscales"] = [{"version": "0.4", **multiscales}]
+    else:
+        root.attrs["ome"] = {"version": "0.5", "multiscales": [multiscales]}
+
+
+@pytest.mark.parametrize("version", ["0.4", "0.5"])
+@pytest.mark.parametrize(
+    ("axes", "shape", "expected"),
+    [
+        (["t", "c", "z", "y", "x"], (2, 3, 4, 32, 32), ["t", "z", "y", "x"]),
+        (["t", "ch", "z", "y", "x"], (2, 3, 4, 32, 32), ["t", "z", "y", "x"]),
+        (["c", "z", "y", "x"], (3, 4, 32, 32), ["z", "y", "x"]),
+        (["c", "y", "x"], (3, 32, 32), ["y", "x"]),
+        (["z", "y", "x"], (4, 32, 32), ["z", "y", "x"]),
+        (["y", "x"], (32, 32), ["y", "x"]),
+    ],
+)
+def test_label_image_drops_only_the_channel_axis(
+    tmp_path, version, axes, shape, expected
+):
+    import ngff_zarr
+    import zarr
+
+    source = str(tmp_path / "source.ome.zarr")
+    _write_ngff_source(source, axes, shape, version)
+    feet = Footprints(np.asarray([[0, 8, 16]]), np.asarray([[1, 8, 8]]))
+    path = write_label_image(source, "clusters", feet, np.asarray([3]))
+
+    lab = zarr.open_group(path, mode="r")
+    attrs = dict(lab.attrs)
+    ms = (attrs["ome"] if version == "0.5" else attrs)["multiscales"][0]
+    assert [a["name"] for a in ms["axes"]] == expected
+    keep = [axes.index(a) for a in expected]
+    for k, ds in enumerate(ms["datasets"]):
+        scale, translation = ds["coordinateTransformations"]
+        factors = [float(2**k) if a in ("y", "x") else 1.0 for a in expected]
+        assert scale["scale"] == factors
+        assert translation["translation"] == [0.0] * len(expected)
+        level = lab[ds["path"]]
+        assert level.shape == tuple(
+            int(shape[i] / f) for i, f in zip(keep, factors, strict=True)
+        )
+        if version == "0.5":
+            assert level.metadata.dimension_names == tuple(expected)
+        first = np.asarray(level[0] if "t" in expected else level[...])
+        assert (first == 3).sum() == (8 // 2**k) ** 2
+        if "t" in expected:  # footprints have no time: only t = 0 is written
+            assert not np.asarray(level[1:]).any()
+    ngff_zarr.from_ngff_zarr(path, validate=True)
+
+
+@pytest.mark.parametrize("version", ["0.4", "0.5"])
+def test_label_image_drops_channel_from_global_transforms(tmp_path, version):
+    # Not checked with ngff_zarr validate=True: 0.37.1 crashes on any global transform.
+    import zarr
+
+    source = str(tmp_path / "source.ome.zarr")
+    _write_ngff_source(
+        source, ["c", "z", "y", "x"], (3, 4, 32, 32), version, [9.0, 2.0, 3.0, 4.0]
+    )
+    feet = Footprints(np.asarray([[0, 8, 16]]), np.asarray([[1, 8, 8]]))
+    path = write_label_image(source, "clusters", feet, np.asarray([3]))
+
+    attrs = dict(zarr.open_group(path, mode="r").attrs)
+    ms = (attrs["ome"] if version == "0.5" else attrs)["multiscales"][0]
+    assert ms["coordinateTransformations"] == [
+        {"type": "scale", "scale": [2.0, 3.0, 4.0]}
+    ]
 
 
 def test_label_name_collision_needs_overwrite(embedded, tmp_path):

@@ -24,9 +24,9 @@ Notable changes to raw2features, newest first. This project follows
   built-ins `trimodal` - model file `model.pt` by default, placeholder inference for
   now - and `placeholder`) and writes per-model JSON (with embedding and clustering
   model sha256), a binary glTF scene (one quad mesh per location, named by feature ID)
-  and, with `--write-labels`, an NGFF label image in the source. Each location is drawn
-  as its patch footprint (an axis-aligned quad covering exactly the embedded area, in
-  level-0 pixel units). New `trimodal` extra (dependencies to be added).
+  and, with `--write-labels`, an NGFF label image in the source with the source's axes
+  and pyramid minus the channel axis. Each location is drawn as its patch footprint (an
+  axis-aligned quad covering exactly the embedded area, in level-0 pixel units). New `trimodal` extra (dependencies to be added).
 
 ## [0.2.1] - 2026-08-16
 
