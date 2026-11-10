@@ -28,7 +28,7 @@ Notable changes to raw2features, newest first. This project follows
   and pyramid minus the channel axis. Each location is drawn as its patch footprint (an
   axis-aligned quad covering exactly the embedded area, in level-0 pixel units);
   `--gltf-glyph marker` draws the glTF scene as a small centre ellipsoid with a
-  crosshair along the patch diagonals as lines instead (`--gltf-cross-arm`, default
+  crosshair of thin triangular prisms along the patch diagonals instead (`--gltf-cross-arm`, default
   0.35 of the way to each corner). New `trimodal` extra (dependencies to be added).
 
 ## [0.2.1] - 2026-08-16

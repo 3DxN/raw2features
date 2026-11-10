@@ -12,10 +12,12 @@ one of ``GLYPHS``:
   visible from both sides.
 * ``marker`` - a small ellipsoid at the centre (semi-axes ``MARKER_RADIUS`` of the
   footprint side along x/y, of the shorter side along z) plus a crosshair along the
-  two footprint diagonals, drawn as lines rather than faces. Each arm reaches
-  ``cross_arm`` of the way from the centre to its corner (default ``CROSS_ARM``):
-  full-length diagonals of neighbouring footprints are collinear and join up into a
-  lattice that hides which patch is which.
+  two footprint diagonals, each a thin closed prism with a triangular cross-section
+  (circumradius ``CROSS_RADIUS`` of the shorter side) - faces, not glTF lines, which
+  many viewers do not display. Each arm reaches ``cross_arm`` of the way from the
+  centre to its corner (default ``CROSS_ARM``): full-length diagonals of neighbouring
+  footprints are collinear and join up into a lattice that hides which patch is
+  which.
 
 No colours are baked in. Written with numpy + ``struct`` only.
 
@@ -37,10 +39,11 @@ _CHUNK_JSON = 0x4E4F534A
 _CHUNK_BIN = 0x004E4942
 _FLOAT, _USHORT = 5126, 5123
 _ARRAY_BUFFER, _ELEMENT_ARRAY_BUFFER = 34962, 34963
-_LINES, _TRIANGLES = 1, 4
+_TRIANGLES = 4
 
 GLYPHS = ("quad", "marker")
-MARKER_RADIUS = 0.08  # marker ellipsoid semi-axis, as a fraction of the patch side
+MARKER_RADIUS = 0.04  # marker ellipsoid semi-axis, as a fraction of the patch side
+CROSS_RADIUS = 0.01  # crosshair prism circumradius, as a fraction of the patch side
 CROSS_ARM = 0.35  # marker crosshair arm, as a fraction of the centre-corner distance
 _RINGS, _SEGMENTS = 8, 12  # ellipsoid tessellation (latitude, longitude)
 
@@ -95,14 +98,60 @@ def ellipsoid(
     )
 
 
+def prism(
+    p0: np.ndarray, p1: np.ndarray, radius: float
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """``(vertices (24,3) float32, normals (24,3) float32, faces (8,3) uint16)``: a
+    closed, flat-shaded prism from ``p0`` to ``p1`` whose cross-section is an
+    equilateral triangle of circumradius ``radius`` (one corner towards +z for an
+    axis in the xy plane), faces wound counter-clockwise seen from outside."""
+    p0, p1 = np.asarray(p0, dtype=np.float64), np.asarray(p1, dtype=np.float64)
+    axis = (p1 - p0) / np.linalg.norm(p1 - p0)
+    up = np.float64([0, 0, 1]) if abs(axis[2]) < 0.9 else np.float64([1, 0, 0])
+    side = np.cross(axis, up)
+    side /= np.linalg.norm(side)
+    up = np.cross(side, axis)
+    angles = np.pi / 2 + 2 * np.pi / 3 * np.arange(3)
+    ring = radius * (np.cos(angles)[:, None] * side + np.sin(angles)[:, None] * up)
+    corners = np.concatenate([p0 + ring, p1 + ring])  # 0-2 at p0, 3-5 at p1
+    triangles = [(0, 1, 2), (3, 4, 5)]
+    for a in range(3):
+        b = (a + 1) % 3
+        triangles += [(a, b, b + 3), (a, b + 3, a + 3)]
+    centre = (p0 + p1) / 2
+    vertices, normals = [], []
+    for triangle in triangles:  # one vertex per face corner, for flat shading
+        pts = corners[list(triangle)]
+        normal = np.cross(pts[1] - pts[0], pts[2] - pts[0])
+        if normal @ (pts.mean(0) - centre) < 0:  # convex: outward is away from centre
+            pts, normal = pts[::-1], -normal
+        vertices.append(pts)
+        normals.append(np.tile(normal / np.linalg.norm(normal), (3, 1)))
+    return (
+        np.concatenate(vertices).astype(np.float32),
+        np.concatenate(normals).astype(np.float32),
+        np.arange(3 * len(triangles), dtype=np.uint16).reshape(-1, 3),
+    )
+
+
 def crosshair(
-    height: float, width: float, arm: float = 1.0
-) -> tuple[np.ndarray, np.ndarray]:
-    """``(vertices (4,3) float32, segments (2,2) uint16)``: the diagonals of a
-    ``width x height`` footprint centred on the origin in the z = 0 plane, each arm
-    ``arm`` of the way from the centre to its corner."""
-    vertices, _faces = quad(arm * height, arm * width)
-    return vertices, np.asarray([(0, 2), (1, 3)], dtype=np.uint16)
+    height: float, width: float, arm: float = 1.0, radius: float = 1.0
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """``(vertices, normals, faces)`` as for ``prism``: two prisms of circumradius
+    ``radius`` along the diagonals of a ``width x height`` footprint centred on the
+    origin in the z = 0 plane - first from ``(-x, -y)`` to ``(x, y)``, then from
+    ``(x, -y)`` to ``(-x, y)`` - each arm ``arm`` of the way to its corner."""
+    x, y = arm * width / 2.0, arm * height / 2.0
+    parts = [
+        prism((-x, -y, 0.0), (x, y, 0.0), radius),
+        prism((x, -y, 0.0), (-x, y, 0.0), radius),
+    ]
+    n = len(parts[0][0])
+    return (
+        np.concatenate([v for v, _n, _f in parts]),
+        np.concatenate([nrm for _v, nrm, _f in parts]),
+        np.concatenate([f + k * n for k, (_v, _n, f) in enumerate(parts)]),
+    )
 
 
 def check_glyph(glyph: str, cross_arm: float) -> None:
@@ -114,20 +163,16 @@ def check_glyph(glyph: str, cross_arm: float) -> None:
 
 
 def _parts(glyph: str, height: float, width: float, cross_arm: float) -> list[tuple]:
-    """``(vertices, normals or None, indices, mode)`` per primitive of one glyph."""
+    """``(vertices, normals, faces)`` per triangle primitive of one glyph."""
     if glyph == "quad":
         vertices, faces = quad(height, width)
         normals = np.tile(np.float32([0, 0, 1]), (len(vertices), 1))
-        return [(vertices, normals, faces, _TRIANGLES)]
-    r = MARKER_RADIUS * min(height, width)
-    vertices, normals, faces = ellipsoid(
-        MARKER_RADIUS * width, MARKER_RADIUS * height, r
+        return [(vertices, normals, faces)]
+    short = min(height, width)
+    sphere = ellipsoid(
+        MARKER_RADIUS * width, MARKER_RADIUS * height, MARKER_RADIUS * short
     )
-    lines, segments = crosshair(height, width, cross_arm)
-    return [
-        (vertices, normals, faces, _TRIANGLES),
-        (lines, None, segments, _LINES),
-    ]
+    return [sphere, crosshair(height, width, cross_arm, CROSS_RADIUS * short)]
 
 
 def _geometry(glyph: str, cross_arm: float) -> str:
@@ -135,8 +180,9 @@ def _geometry(glyph: str, cross_arm: float) -> str:
         return "patch footprint quad, axis-aligned, z = plane index"
     return (
         f"ellipsoid at the footprint centre (semi-axes {MARKER_RADIUS} x footprint "
-        f"side) and the footprint diagonals as lines, {cross_arm} of the way from "
-        "the centre to each corner, z = plane index"
+        f"side) and the footprint diagonals as triangular prisms (circumradius "
+        f"{CROSS_RADIUS} x footprint side), {cross_arm} of the way from the centre "
+        "to each corner, z = plane index"
     )
 
 
@@ -169,31 +215,25 @@ def write_glb(
     primitives: list[list[dict]] = []  # per shape
     for height, width in shapes.tolist():
         shape_primitives = []
-        for vertices, normals, indices, mode in _parts(glyph, height, width, cross_arm):
-            n = len(vertices)
-            attributes = {"POSITION": len(accessors)}
-            blobs.append((vertices.tobytes(), _ARRAY_BUFFER))
-            accessors.append(
-                {"bufferView": len(accessors), "componentType": _FLOAT, "count": n,
+        for vertices, normals, indices in _parts(glyph, height, width, cross_arm):
+            base, n = len(accessors), len(vertices)
+            blobs += [
+                (vertices.tobytes(), _ARRAY_BUFFER),
+                (normals.tobytes(), _ARRAY_BUFFER),
+                (indices.reshape(-1).tobytes(), _ELEMENT_ARRAY_BUFFER),
+            ]
+            accessors += [
+                {"bufferView": base, "componentType": _FLOAT, "count": n,
                  "type": "VEC3", "min": vertices.min(0).tolist(),
-                 "max": vertices.max(0).tolist()}
-            )  # fmt: skip
-            if normals is not None:
-                attributes["NORMAL"] = len(accessors)
-                blobs.append((normals.tobytes(), _ARRAY_BUFFER))
-                accessors.append(
-                    {"bufferView": len(accessors), "componentType": _FLOAT,
-                     "count": n, "type": "VEC3"}
-                )  # fmt: skip
-            index = len(accessors)
-            blobs.append((indices.reshape(-1).tobytes(), _ELEMENT_ARRAY_BUFFER))
-            accessors.append(
-                {"bufferView": index, "componentType": _USHORT,
-                 "count": int(indices.size), "type": "SCALAR"}
-            )  # fmt: skip
+                 "max": vertices.max(0).tolist()},
+                {"bufferView": base + 1, "componentType": _FLOAT, "count": n,
+                 "type": "VEC3"},
+                {"bufferView": base + 2, "componentType": _USHORT,
+                 "count": int(indices.size), "type": "SCALAR"},
+            ]  # fmt: skip
             shape_primitives.append(
-                {"attributes": attributes, "indices": index, "material": 0,
-                 "mode": mode}
+                {"attributes": {"POSITION": base, "NORMAL": base + 1},
+                 "indices": base + 2, "material": 0, "mode": _TRIANGLES}
             )  # fmt: skip
         primitives.append(shape_primitives)
     views, offset = [], 0

@@ -57,7 +57,8 @@ def cluster(
         "quad",
         "--gltf-glyph",
         help="glTF primitive per location: 'quad' (the patch footprint) or 'marker' "
-        "(a small ellipsoid at the patch centre with the patch diagonals as lines).",
+        "(a small ellipsoid at the patch centre with a crosshair of thin prisms "
+        "along the patch diagonals).",
     ),
     gltf_cross_arm: float | None = typer.Option(
         None,

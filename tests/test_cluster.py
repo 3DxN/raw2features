@@ -437,12 +437,11 @@ def test_gltf_marker_glyph_is_centre_ellipsoid_and_diagonal_lines(embedded, tmp_
         z, y0, x0 = record["footprints"][node["name"]]["origin_zyx"]
         assert node["translation"] == [x0 + (side - 1) / 2, y0 + (side - 1) / 2, z]
 
-    # One shared geometry: a closed ellipsoid (triangles) and two diagonals (lines).
+    # One shared geometry: a closed ellipsoid and two diagonal prisms, all triangles.
     (prims,) = {json.dumps(m["primitives"]) for m in doc["meshes"]}
-    sphere, lines = json.loads(prims)
-    assert (sphere["mode"], lines["mode"]) == (4, 1)
-    assert "NORMAL" not in lines["attributes"]
-    r = 0.08 * side
+    sphere, cross = json.loads(prims)
+    assert (sphere["mode"], cross["mode"]) == (4, 4)
+    r = 0.04 * side
     verts = _accessor(path, doc, sphere["attributes"]["POSITION"])
     np.testing.assert_allclose(np.linalg.norm(verts, axis=1), r, rtol=1e-5)
     faces = _accessor(path, doc, sphere["indices"]).reshape(-1, 3)
@@ -458,21 +457,43 @@ def test_gltf_marker_glyph_is_centre_ellipsoid_and_diagonal_lines(embedded, tmp_
     normals = _accessor(path, doc, sphere["attributes"]["NORMAL"])
     np.testing.assert_allclose(normals, verts / r, atol=1e-5)
 
-    # Diagonals through the centre, by default 35% of the way to each corner.
-    h = 0.35 * side / 2
-    np.testing.assert_allclose(_cross_segments(path, doc, lines), [
-        (-h, -h, 0.0, h, h, 0.0),
-        (h, -h, 0.0, -h, h, 0.0),
-    ], rtol=1e-6)  # fmt: skip
+    # Prisms along the diagonals, by default 35% of the way to each corner.
+    _check_cross(path, doc, cross, side, arm=0.35)
     assert doc["materials"] == [{"name": "marker"}]
     assert "ellipsoid" in doc["asset"]["extras"]["geometry"]
 
 
-def _cross_segments(path: str, doc: dict, lines: dict) -> list:
-    """The crosshair's line segments as sorted ``(x0, y0, z0, x1, y1, z1)``."""
-    corners = _accessor(path, doc, lines["attributes"]["POSITION"])
-    segments = _accessor(path, doc, lines["indices"]).reshape(-1, 2)
-    return sorted(map(tuple, corners[segments].reshape(-1, 6).tolist()))
+def _check_cross(path: str, doc: dict, cross: dict, side: float, arm: float) -> None:
+    """Two closed, outward-wound triangular prisms of circumradius 0.01 x ``side``,
+    along the footprint diagonals, ``arm`` of the way from the centre to a corner."""
+    verts = _accessor(path, doc, cross["attributes"]["POSITION"]).astype(np.float64)
+    normals = _accessor(path, doc, cross["attributes"]["NORMAL"])
+    faces = _accessor(path, doc, cross["indices"]).reshape(-1, 3)
+    assert len(faces) == 16  # 2 prisms x (3 sides x 2 + 2 caps)
+    tris = verts[faces]
+    face_normals = np.cross(tris[:, 1] - tris[:, 0], tris[:, 2] - tris[:, 0])
+    # Each prism is centred on the origin, so outward faces point away from it.
+    assert (np.einsum("ij,ij->i", face_normals, tris.mean(1)) > 0).all()
+    unit = face_normals / np.linalg.norm(face_normals, axis=1, keepdims=True)
+    np.testing.assert_allclose(
+        normals[faces], np.repeat(unit[:, None], 3, 1), atol=1e-5
+    )
+    half = 24  # vertices per prism
+    for k, direction in enumerate([(1.0, 1.0, 0.0), (-1.0, 1.0, 0.0)]):
+        d = np.asarray(direction) / np.sqrt(2.0)
+        part = verts[k * half : (k + 1) * half]
+        t = part @ d
+        np.testing.assert_allclose(np.abs(t), arm * side / np.sqrt(2.0), rtol=1e-5)
+        dist = np.linalg.norm(part - t[:, None] * d, axis=1)
+        np.testing.assert_allclose(dist, 0.01 * side, rtol=1e-4)
+        corners = {tuple(np.round(v, 3)) for v in part.tolist()}
+        assert len(corners) == 6  # closed: every face corner is a prism corner
+        edges = Counter(
+            tuple(sorted((tuple(np.round(a, 3)), tuple(np.round(b, 3)))))
+            for tri in tris[8 * k : 8 * (k + 1)]
+            for a, b in zip(tri, np.roll(tri, -1, 0), strict=True)
+        )
+        assert set(edges.values()) == {2}  # watertight
 
 
 @pytest.mark.parametrize("glyph", ["quad", "marker"])
@@ -548,12 +569,8 @@ def test_cli_cluster(embedded, tmp_path):
     doc = _read_glb(path)
     assert doc["materials"] == [{"name": "marker"}]
     side = record["footprints"][record["feature_ids"][0]]["size_zyx"][1]
-    h = side / 2  # arm 1: the full diagonals, corner to corner
-    lines = doc["meshes"][0]["primitives"][1]
-    assert _cross_segments(path, doc, lines) == [
-        (-h, -h, 0.0, h, h, 0.0),
-        (h, -h, 0.0, -h, h, 0.0),
-    ]
+    cross = doc["meshes"][0]["primitives"][1]
+    _check_cross(path, doc, cross, side, arm=1.0)  # the full diagonals
     unknown = CliRunner().invoke(app, ["cluster", store, "--gltf-glyph", "x"])
     assert unknown.exit_code == 1 and "glyph" in unknown.output
     no_arm = CliRunner().invoke(
