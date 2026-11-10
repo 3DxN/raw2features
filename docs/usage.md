@@ -697,9 +697,9 @@ planned; see `clustering/footprint.py`). Per model it writes:
   how far each arm reaches, as a fraction of the way from the centre to its corner
   (default 0.35; 1 draws the full diagonals, which join up with their neighbours'
   into a lattice). Each glyph is one node and one mesh, both named by
-  feature ID; colour by joining the JSON `clusters` on it. All meshes share one
-  material, so to colour glyphs individually assign each its own material - changing
-  the shared one recolours all of them.
+  feature ID; colour by joining the JSON `clusters` on it. The scene carries no
+  colour of its own: all meshes share one plain material and there are no vertex
+  colours, so the viewer applies colour at runtime.
 - `--write-labels` - an NGFF label image in the **source** OME-Zarr at
   `labels/clusters_<last 8 of embedding sha>_<last 8 of clustering model sha>/` (the
   `labels` listing is appended to), mirroring the image's pyramid, chunking, transforms
