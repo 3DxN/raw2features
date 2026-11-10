@@ -1,4 +1,5 @@
-"""Cluster every embedded location of a store and write JSON / labels / glTF outputs."""
+"""Cluster every embedded location of a store; write JSON, glTF, properties, labels
+and the mesh index."""
 
 from __future__ import annotations
 
@@ -13,6 +14,7 @@ from . import trimodal  # noqa: F401 - registers the built-in clusterers
 from .base import ClusterContext, Clusterer, check_clusters
 from .collect import collect_locations, store_models
 from .labels import label_name, local_source_path, write_label_image
+from .meshes import check_mesh_slot, write_mesh_index
 
 CLUSTERS_FORMAT = "raw2features-clusters/0.2"
 
@@ -28,8 +30,9 @@ def cluster_store(
     seed: int = 0,
     write_labels: bool = False,
     source: str | None = None,
-    labels_overwrite: bool = False,
+    overwrite: bool = False,
     gltf: bool = True,
+    write_meshes: bool = False,
     gltf_glyph: str = "quad",
     gltf_cross_arm: float | None = None,
 ) -> list[dict]:
@@ -39,12 +42,16 @@ def cluster_store(
     ``clusterer_model``, ``None`` = its default model file) or an instance.
     ``gltf_glyph`` is the glTF primitive per location (``gltf.GLYPHS``) and
     ``gltf_cross_arm`` the ``marker`` crosshair arm (``None`` = ``gltf.CROSS_ARM``).
+    ``write_labels`` / ``write_meshes`` add the label image / the glTF scene and its
+    properties to the source; ``overwrite`` replaces an existing one of that name.
     """
     from .gltf import CROSS_ARM, check_glyph, write_glb
 
     cross_arm = CROSS_ARM if gltf_cross_arm is None else gltf_cross_arm
     if gltf:
         check_glyph(gltf_glyph, cross_arm)  # before clustering or writing anything
+    if write_meshes and not gltf:
+        raise ValueError("write_meshes needs the glTF scene; do not disable gltf")
     store = os.path.normpath(store)
     out_dir = out_dir or os.path.dirname(os.path.abspath(store))
     os.makedirs(out_dir, exist_ok=True)
@@ -76,7 +83,7 @@ def cluster_store(
             len(loc.feature_ids),
             plugin=ident.plugin,
         )
-        name = label_name(loc.sha256, ident.model_sha256)
+        name = label_name(loc.sha256, ident.model_sha256, loc.grids_digest)
         stem = os.path.join(out_dir, f"{loc.slide_id}.{model}.clusters")
         identity = {
             "embedding_model": {
@@ -95,19 +102,26 @@ def cluster_store(
             },
         }
 
+        source_path = (
+            local_source_path(source or loc.source_uri)
+            if write_labels or write_meshes
+            else None
+        )
+        if write_meshes:  # a collision must stop the run before labels are written
+            check_mesh_slot(source_path, name, overwrite=overwrite)
         label_path = None
         if write_labels:
             label_path = write_label_image(
-                local_source_path(source or loc.source_uri),
+                source_path,
                 name,
                 loc.footprints,
                 clusters,
                 expected_level0_wh=tuple(loc.level_dimensions[0]),
-                overwrite=labels_overwrite,
+                overwrite=overwrite,
                 extra_metadata={"format": CLUSTERS_FORMAT, **identity},
             )
 
-        glb_path = None
+        glb_path = properties_path = mesh_path = None
         if gltf:
             glb_path = write_glb(
                 f"{stem}.glb",
@@ -121,6 +135,24 @@ def cluster_store(
                     "clustering_sha256": ident.model_sha256,
                 },
             )
+            # Glyph i has extras["label-value"] == i + 1; cluster first, so viewers
+            # that default to the first property colour by it.
+            properties_path = f"{stem}.properties.json"
+            with open(properties_path, "w", encoding="utf-8") as fh:
+                json.dump(
+                    [
+                        {"label-value": i + 1, "cluster": int(c), "feature_id": fid}
+                        for i, (fid, c) in enumerate(
+                            zip(loc.feature_ids, clusters, strict=True)
+                        )
+                    ],
+                    fh,
+                    indent=1,
+                )
+            if write_meshes:
+                mesh_path = write_mesh_index(
+                    source_path, name, glb_path, properties_path, overwrite=overwrite
+                )
 
         record = {
             "format": CLUSTERS_FORMAT,
@@ -136,6 +168,10 @@ def cluster_store(
                 {"name": name, "path": label_path} if label_path else {"name": name}
             ),
             "gltf": os.path.basename(glb_path) if glb_path else None,
+            "properties": (
+                os.path.basename(properties_path) if properties_path else None
+            ),
+            "mesh_index": ({"name": name, "path": mesh_path} if mesh_path else None),
             # Order of feature_ids == glTF mesh/node order.
             "feature_ids": loc.feature_ids,
             "clusters": dict(
@@ -163,7 +199,9 @@ def cluster_store(
                 "n": len(loc.feature_ids),
                 "json": json_path,
                 "gltf": glb_path,
+                "properties": properties_path,
                 "labels": label_path,
+                "meshes": mesh_path,
             }
         )
     return summaries

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -36,6 +37,15 @@ class ModelLocations:
     footprints: Footprints = field(default_factory=lambda: concat([]))
     # Per-grid feature blocks, in feature_ids order (kept per grid for memory).
     features: list[tuple[str, object]] = field(default_factory=list)
+    # Geometry identity of each contributing grid (its header ``grid_hash``).
+    grid_hashes: list[str] = field(default_factory=list)
+
+    @property
+    def grids_digest(self) -> str:
+        """sha256 over the sorted grid hashes: which patches were embedded, so runs
+        with another step, patch size or z-plane selection get distinct outputs."""
+        text = "\n".join(sorted(self.grid_hashes))
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def store_models(store: str) -> list[str]:
@@ -103,6 +113,7 @@ def collect_locations(store: str, model: str) -> ModelLocations:
         centers.append(block)
         ids.extend(f"{key}/{row}" for row in range(coords.shape[0]))
         out.features.append((key, g["features"][model]))
+        out.grid_hashes.append(str(header.get("grid_hash") or key))
     if out is None:
         raise ValueError(f"model {model!r} has no features in {store!r}")
     out.feature_ids = ids

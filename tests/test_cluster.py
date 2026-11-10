@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import struct
 import warnings
 from collections import Counter
@@ -60,6 +61,17 @@ def embedded(tmp_path):
     return source, f"{out}/s3d.embeddings.zarr"
 
 
+def _grids_digest(store: str) -> str:
+    """sha256 over the sorted ``grid_hash`` of every grid in ``store``."""
+    from raw2features.core.store import GRIDS, grid_keys, open_root
+
+    root = open_root(store)
+    hashes = sorted(
+        dict(root[GRIDS][k].attrs)["raw2features"]["grid_hash"] for k in grid_keys(root)
+    )
+    return hashlib.sha256("\n".join(hashes).encode("utf-8")).hexdigest()
+
+
 def _load(summary) -> dict:
     with open(summary["json"], encoding="utf-8") as fh:
         return json.load(fh)
@@ -98,8 +110,9 @@ def test_json_assigns_one_placeholder_cluster_per_location(
     emb = record["embedding_model"]
     assert emb["name"] == "mock" and len(emb["sha256"]) == 64
     assert record["label_image"]["name"] == label_name(
-        emb["sha256"], PLACEHOLDER_TRIMODAL_SHA256
+        emb["sha256"], PLACEHOLDER_TRIMODAL_SHA256, _grids_digest(store)
     )
+    assert record["label_image"]["name"].split("_")[-1] == _grids_digest(store)[-8:]
     # Deterministic for a fixed seed.
     (again,) = cluster_store(
         store, out_dir=str(tmp_path / "d"), clusterer="placeholder", gltf=False
@@ -180,7 +193,7 @@ def test_plugin_contract(embedded, tmp_path, monkeypatch):
     )
     assert set(record["clusters"].values()) == {3}
     assert record["clustering_model"]["plugin"] == "recording"
-    assert record["label_image"]["name"].endswith("_abababab")
+    assert record["label_image"]["name"].split("_")[2] == "abababab"
 
     # Resolved by name, as an entry point would be; 0 (background) is rejected.
     registry = plugins._REGISTRY.setdefault("clusterers", {})
@@ -359,9 +372,100 @@ def test_label_name_collision_needs_overwrite(embedded, tmp_path):
         clusterer="placeholder",
         out_dir=str(tmp_path / "c"),
         write_labels=True,
-        labels_overwrite=True,
+        overwrite=True,
         gltf=False,
     )
+
+
+def test_label_listing_is_read_from_disk_not_stale_consolidated_metadata(
+    embedded, tmp_path
+):
+    # A label listed after the root was last consolidated must survive a new label.
+    import zarr
+
+    source, store = embedded
+    image = zarr.open_group(source, mode="r+")
+    labels = image.require_group("labels")
+    labels.require_group("old")
+    labels.attrs["labels"] = ["old"]
+    zarr.consolidate_metadata(image.store)
+    labels.require_group("manual")
+    labels.attrs["labels"] = ["old", "manual"]  # the consolidated copy still says old
+
+    (summary,) = cluster_store(
+        store,
+        out_dir=str(tmp_path / "c"),
+        clusterer="placeholder",
+        write_labels=True,
+        gltf=False,
+    )
+    name = _load(summary)["label_image"]["name"]
+    on_disk = zarr.open_group(f"{source}/labels", mode="r", use_consolidated=False)
+    assert dict(on_disk.attrs)["labels"] == ["old", "manual", name]
+    consolidated = zarr.open_group(source, mode="r")  # refreshed afterwards
+    assert dict(consolidated["labels"].attrs)["labels"] == ["old", "manual", name]
+
+
+def test_properties_map_glyph_label_values_to_clusters(embedded, tmp_path):
+    _source, store = embedded
+    (summary,) = cluster_store(
+        store, out_dir=str(tmp_path / "c"), clusterer="placeholder"
+    )
+    record = _load(summary)
+    assert summary["properties"] == str(
+        tmp_path / "c" / "s3d.mock.clusters.properties.json"
+    )
+    assert record["properties"] == "s3d.mock.clusters.properties.json"
+    assert record["mesh_index"] is None
+    with open(summary["properties"], encoding="utf-8") as fh:
+        properties = json.load(fh)
+    doc = _read_glb(summary["gltf"])
+    assert properties == [
+        {"label-value": i + 1, "cluster": record["clusters"][fid], "feature_id": fid}
+        for i, fid in enumerate(record["feature_ids"])
+    ]
+    assert list(properties[0]) == ["label-value", "cluster", "feature_id"]
+    assert [n["extras"]["label-value"] for n in doc["nodes"]] == [
+        p["label-value"] for p in properties
+    ]
+
+
+def test_write_meshes_lists_scene_and_properties_in_source(embedded, tmp_path):
+    import zarr
+
+    source, store = embedded
+    image = zarr.open_group(source, mode="r+")
+    image.require_group("meshes").attrs["meshes"] = [
+        {"name": "nuclei", "path": "nuclei.glb"}
+    ]
+    kw = {"out_dir": str(tmp_path / "c"), "clusterer": "placeholder"}
+    (summary,) = cluster_store(store, write_meshes=True, **kw)
+    record = _load(summary)
+    name = record["mesh_index"]["name"]
+    assert name == record["label_image"]["name"]  # one run name for both
+    meshes = os.path.join(source, "meshes")
+    assert summary["meshes"] == record["mesh_index"]["path"] == f"{meshes}/{name}.glb"
+    listing = dict(zarr.open_group(meshes, mode="r", use_consolidated=False).attrs)
+    assert listing["meshes"] == [
+        {"name": "nuclei", "path": "nuclei.glb"},
+        {"name": name, "path": f"{name}.glb", "properties": f"{name}.properties.json"},
+    ]
+    with open(f"{meshes}/{name}.glb", "rb") as a, open(summary["gltf"], "rb") as b:
+        assert a.read() == b.read()
+    with open(f"{meshes}/{name}.properties.json", encoding="utf-8") as fh:
+        assert json.load(fh)[0]["label-value"] == 1
+
+    # A second run of the same store collides before anything is written ...
+    with pytest.raises(FileExistsError, match="mesh"):
+        cluster_store(store, write_meshes=True, write_labels=True, **kw)
+    assert "labels" not in zarr.open_group(source, mode="r", use_consolidated=False)
+    # ... and overwrite replaces the entry in place.
+    cluster_store(store, write_meshes=True, overwrite=True, **kw)
+    listing = dict(zarr.open_group(meshes, mode="r", use_consolidated=False).attrs)
+    assert [e["name"] for e in listing["meshes"]] == ["nuclei", name]
+
+    with pytest.raises(ValueError, match="glTF"):
+        cluster_store(store, write_meshes=True, gltf=False, **kw)
 
 
 def test_remote_sources_are_refused():
@@ -513,7 +617,14 @@ def test_each_glyph_is_one_mesh_addressable_by_feature_id(embedded, tmp_path, gl
     ):
         assert node["mesh"] == i
         assert node["name"] == mesh["name"] == fid
-        assert node["extras"] == mesh["extras"] == {"feature_id": fid}
+        assert (
+            node["extras"]
+            == mesh["extras"]
+            == {
+                "feature_id": fid,
+                "label-value": i + 1,
+            }
+        )
         assert "children" not in node
         assert len(mesh["primitives"]) == (1 if glyph == "quad" else 2)
 
@@ -571,6 +682,13 @@ def test_cli_cluster(embedded, tmp_path):
     side = record["footprints"][record["feature_ids"][0]]["size_zyx"][1]
     cross = doc["meshes"][0]["primitives"][1]
     _check_cross(path, doc, cross, side, arm=1.0)  # the full diagonals
+    meshes = CliRunner().invoke(
+        app,
+        ["cluster", store, "--out-dir", str(tmp_path / "w"), "--clusterer",
+         "placeholder", "--write-meshes"],
+    )  # fmt: skip
+    assert meshes.exit_code == 0, meshes.output
+    assert "properties:" in meshes.output and "meshes:" in meshes.output
     unknown = CliRunner().invoke(app, ["cluster", store, "--gltf-glyph", "x"])
     assert unknown.exit_code == 1 and "glyph" in unknown.output
     no_arm = CliRunner().invoke(

@@ -28,9 +28,13 @@ from .footprint import Footprints
 SPATIAL = ("z", "y", "x")
 
 
-def label_name(embedding_sha256: str, trimodal_sha256: str) -> str:
-    """``clusters_<last 8 of embedding sha>_<last 8 of trimodal sha>``."""
-    return f"clusters_{embedding_sha256[-8:]}_{trimodal_sha256[-8:]}"
+def label_name(embedding_sha256: str, trimodal_sha256: str, grids_digest: str) -> str:
+    """``clusters_<emb8>_<model8>_<grids8>``: the last 8 hex digits of the embedding
+    model, the clustering model and the run's grids digest, so a run with other
+    patches (step, size, z planes) does not reuse another run's name."""
+    return (
+        f"clusters_{embedding_sha256[-8:]}_{trimodal_sha256[-8:]}_{grids_digest[-8:]}"
+    )
 
 
 def local_source_path(uri: str) -> str:
@@ -63,11 +67,14 @@ def _transform(dataset: dict, kind: str, n: int) -> list[float] | None:
 def _open_image(root_path: str):
     """``(image_group, prefix, attrs_key, multiscales)`` - NGFF 0.4 and 0.5 (``ome``).
 
-    ``prefix`` is ``"0"`` for a bioformats2raw layout, else ``""``.
+    ``prefix`` is ``"0"`` for a bioformats2raw layout, else ``""``. Metadata is read
+    from the groups themselves, never from consolidated metadata: a stale root copy
+    would hide label images (or meshes) listed since, and rewriting a listing from it
+    would drop them.
     """
     import zarr
 
-    root = zarr.open_group(root_path, mode="r+")
+    root = zarr.open_group(root_path, mode="r+", use_consolidated=False)
     candidates = [("", root)]
     if "0" in root:
         candidates.append(("0", root["0"]))
@@ -142,8 +149,6 @@ def write_label_image(
     extra_metadata: dict | None = None,
 ) -> str:
     """Rasterise every footprint into ``<image>/labels/<name>``; return its path."""
-    import zarr
-
     image, prefix, ome_key, ms = _open_image(source_path)
     axes = [a["name"] if isinstance(a, dict) else str(a) for a in ms["axes"]]
     levels = _levels(image, ms, axes)
@@ -246,11 +251,20 @@ def write_label_image(
         labels.attrs["ome"] = {**listing, "version": version, "labels": names}
     else:
         labels.attrs["labels"] = names
-    try:
-        zarr.consolidate_metadata(zarr.open_group(source_path, mode="r+").store)
-    except Exception:  # noqa: BLE001 - consolidation is an optional read accelerator
-        pass
+    reconsolidate(source_path)
     return os.path.join(source_path, prefix, "labels", name)
+
+
+def reconsolidate(root_path: str) -> None:
+    """Refresh the root's consolidated metadata, if it can be (an optional read
+    accelerator: a failure leaves the groups themselves correct)."""
+    import zarr
+
+    try:
+        root = zarr.open_group(root_path, mode="r+", use_consolidated=False)
+        zarr.consolidate_metadata(root.store)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _level_boxes(lv: _Level, spatial, footprints: Footprints):

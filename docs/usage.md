@@ -654,12 +654,13 @@ Inline (`--emit-thumbnail`) also records the thumbnail metadata in the store's
 
 ---
 
-### `cluster` - clustering → JSON, OME-Zarr labels, glTF
+### `cluster` - clustering → JSON, glTF, OME-Zarr labels and meshes
 
 ```bash
 raw2features cluster out/slide.embeddings.zarr [-m uni2_h] [--clusterer trimodal] \
     [--clusterer-model model.pt] [--clusterer-input NAME=PATH ...] \
-    [--write-labels] [--no-gltf] [--gltf-glyph quad|marker] [--seed 0]
+    [--write-labels] [--write-meshes] [--overwrite] [--no-gltf] \
+    [--gltf-glyph quad|marker] [--seed 0]
 ```
 
 Assigns every embedded location (all grids, i.e. all z planes) of each model one
@@ -685,7 +686,8 @@ planned; see `clustering/footprint.py`). Per model it writes:
   (`embedding_model.sha256` is the pinned `weights_sha256`, or the output fingerprint
   for models without one - see `sha256_kind`).
 - `<slide>.<model>.clusters.glb` - binary glTF scene with one mesh per location;
-  mesh *i*, node *i* and their `name` / `extras.feature_id` are the *i*-th feature ID.
+  mesh *i*, node *i* and their `name` / `extras.feature_id` are the *i*-th feature ID,
+  and their `extras["label-value"]` is the integer glyph ID *i* + 1.
   Node `translation` is the footprint centre `(x, y, z)` in level-0 voxels (voxel
   centres at integer indices, so a quad spans `x0 - 0.5 .. x0 + side - 0.5`).
   `--gltf-glyph` picks what is drawn there: `quad` (default) is the footprint itself,
@@ -700,9 +702,19 @@ planned; see `clustering/footprint.py`). Per model it writes:
   feature ID; colour by joining the JSON `clusters` on it. The scene carries no
   colour of its own: all meshes share one plain material and there are no vertex
   colours, so the viewer applies colour at runtime.
+- `<slide>.<model>.clusters.properties.json` (with the glTF scene) - one entry per
+  glyph in the NGFF `image-label.properties` layout,
+  `[{"label-value": 1, "cluster": 23, "feature_id": "mpp0.5_px224_z0/0"}, ...]`, for
+  viewers that key meshes by integer label (`cluster` comes first, so a viewer that
+  defaults to the first property colours by it).
+- `--write-meshes` - copies the scene and its properties into the **source** OME-Zarr
+  as `meshes/<name>.glb` and `meshes/<name>.properties.json` and lists them in the
+  attributes of the `meshes` zarr group, `{"meshes": [{"name", "path", "properties"}]}`
+  (paths relative to `meshes/`; other entries are kept). This is a viewer convention,
+  not part of NGFF. A name already listed, or whose files exist, stops the run before
+  anything is written unless `--overwrite` is given.
 - `--write-labels` - an NGFF label image in the **source** OME-Zarr at
-  `labels/clusters_<last 8 of embedding sha>_<last 8 of clustering model sha>/` (the
-  `labels` listing is appended to), mirroring the image's pyramid, chunking, transforms
+  `labels/<name>/` (the `labels` listing is appended to), mirroring the image's pyramid, chunking, transforms
   and axes except the channel axis, which is removed (`tczyx` gives `tzyx`, `cyx` gives
   `yx`). A time axis keeps its length, but only `t = 0` is written, so later timepoints
   are empty. Each footprint covers its `side x side` voxels on its plane
@@ -714,6 +726,15 @@ planned; see `clustering/footprint.py`). Per model it writes:
   local copy). The `image-label.colors` entries list only `label-value`, with no
   `rgba` display colour: NGFF makes `rgba` optional, but `ome-zarr-models` 1.7 rejects
   entries without it.
+
+Label images and mesh entries of one run share the name
+`clusters_<emb8>_<model8>_<grids8>`: the last 8 hex digits of the embedding model
+sha256, the clustering model sha256 and a digest of the run's grid hashes. A store
+embedded with another step, patch size or z-plane selection therefore gets its own
+name, while re-clustering the same store needs `--overwrite` (alias
+`--labels-overwrite`). Listings are read from the groups themselves, not from
+consolidated metadata, and the root's consolidated metadata is refreshed afterwards,
+so entries added since the last consolidation are kept.
 
 **Writing a clusterer.** Subclass `raw2features.clustering.Clusterer`
 (`clustering/base.py` documents the contract) and register it in your package:

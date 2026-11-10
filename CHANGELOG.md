@@ -29,7 +29,14 @@ Notable changes to raw2features, newest first. This project follows
   axis-aligned quad covering exactly the embedded area, in level-0 pixel units);
   `--gltf-glyph marker` draws the glTF scene as a small centre ellipsoid with a
   crosshair of thin triangular prisms along the patch diagonals instead (`--gltf-cross-arm`, default
-  0.35 of the way to each corner). New `trimodal` extra (dependencies to be added).
+  0.35 of the way to each corner). Each glyph also carries an integer
+  `extras["label-value"]`, and a `<slide>.<model>.clusters.properties.json` maps it to
+  cluster and feature ID; `--write-meshes` copies both into the source's `meshes/`
+  and lists them in `meshes/zarr.json`. Label image and mesh names include a digest
+  of the run's grids, so runs with other patches no longer share one name;
+  `--overwrite` (alias `--labels-overwrite`) replaces either. Label listings are read
+  from disk rather than stale consolidated metadata. New `trimodal` extra
+  (dependencies to be added).
 
 ## [0.2.1] - 2026-08-16
 

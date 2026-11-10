@@ -1,11 +1,13 @@
 """Binary glTF 2.0 (``.glb``) scene: one mesh per embedded location.
 
-Mesh ``i`` and node ``i`` both carry ``name == feature_ids[i]`` (and
-``extras.feature_id``), so the clusters JSON - keyed by the same feature IDs - maps
-meshes to cluster values for colour-coded display. Each node's ``translation`` is the
-patch footprint centre (``footprint``) as level-0 ``(x, y, z)`` (voxel-centre
-convention); footprints of equal size share one geometry. The glyph drawn there is
-one of ``GLYPHS``:
+Mesh ``i`` and node ``i`` both carry ``name == feature_ids[i]`` and, in ``extras``,
+``feature_id`` (the same string) and ``label-value`` (``i + 1``, an integer glyph ID).
+The clusters JSON maps feature IDs to cluster values; the properties file maps
+``label-value`` to cluster and feature ID in the NGFF ``image-label.properties``
+layout, as viewers that key meshes by integer label read it. Each node's
+``translation`` is the patch footprint centre (``footprint``) as level-0 ``(x, y, z)``
+(voxel-centre convention); footprints of equal size share one geometry. The glyph
+drawn there is one of ``GLYPHS``:
 
 * ``quad`` - the footprint itself: axis-aligned, exactly the level-0 area the
   embedding was computed from, in its z plane, with a double-sided material so it is
@@ -256,12 +258,12 @@ def write_glb(
             {
                 "name": fid,
                 "primitives": primitives[int(shape_of[i])],
-                "extras": {"feature_id": fid},
+                "extras": {"feature_id": fid, "label-value": i + 1},
             }
         )
         nodes.append({"name": fid, "mesh": i,
                       "translation": [float(x), float(y), float(z)],
-                      "extras": {"feature_id": fid}})  # fmt: skip
+                      "extras": {"feature_id": fid, "label-value": i + 1}})  # fmt: skip
     doc = {
         "asset": {
             "version": "2.0",

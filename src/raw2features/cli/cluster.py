@@ -39,16 +39,26 @@ def cluster(
         "--write-labels",
         help="Write the clusters as an OME-Zarr label image (one patch-footprint "
         "quad per location) into the source image under "
-        "labels/clusters_<emb8>_<tri8>. Modifies the source.",
+        "labels/clusters_<emb8>_<model8>_<grids8>. Modifies the source.",
+    ),
+    write_meshes: bool = typer.Option(
+        False,
+        "--write-meshes",
+        help="Copy the glTF scene and its properties into the source image under "
+        "meshes/ and list them in meshes/zarr.json, for viewers that discover meshes "
+        "there. Modifies the source.",
     ),
     source: str | None = typer.Option(
         None,
         "--source",
-        help="Local source OME-Zarr for --write-labels (default: the store's "
-        "recorded source URI).",
+        help="Local source OME-Zarr for --write-labels / --write-meshes (default: "
+        "the store's recorded source URI).",
     ),
-    labels_overwrite: bool = typer.Option(
-        False, "--labels-overwrite", help="Replace an existing label of that name."
+    overwrite: bool = typer.Option(
+        False,
+        "--overwrite",
+        "--labels-overwrite",
+        help="Replace an existing label image / mesh entry of that name.",
     ),
     gltf: bool = typer.Option(
         True, "--gltf/--no-gltf", help="Write a .glb scene (one glyph per location)."
@@ -90,8 +100,9 @@ def cluster(
             seed=seed,
             write_labels=write_labels,
             source=source,
-            labels_overwrite=labels_overwrite,
+            overwrite=overwrite,
             gltf=gltf,
+            write_meshes=write_meshes,
             gltf_glyph=gltf_glyph,
             gltf_cross_arm=gltf_cross_arm,
         )
@@ -106,6 +117,6 @@ def cluster(
         raise typer.Exit(1) from exc
     for s in summaries:
         typer.echo(f"{s['model']}: {s['n']} locations")
-        for key in ("json", "gltf", "labels"):
+        for key in ("json", "gltf", "properties", "labels", "meshes"):
             if s[key]:
                 typer.echo(f"  {key}: {s[key]}")
