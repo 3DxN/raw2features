@@ -23,10 +23,13 @@ Notable changes to raw2features, newest first. This project follows
   (new `raw2features.clusterers` entry-point group, `clustering.Clusterer` interface;
   built-ins `trimodal` - model file `model.pt` by default, placeholder inference for
   now - and `placeholder`) and writes per-model JSON (with embedding and clustering
-  model sha256), a binary glTF scene (one quad mesh per location, named by feature ID)
+  model sha256), a binary glTF scene (one mesh per location, named by feature ID)
   and, with `--write-labels`, an NGFF label image in the source with the source's axes
   and pyramid minus the channel axis. Each location is drawn as its patch footprint (an
-  axis-aligned quad covering exactly the embedded area, in level-0 pixel units). New `trimodal` extra (dependencies to be added).
+  axis-aligned quad covering exactly the embedded area, in level-0 pixel units);
+  `--gltf-glyph marker` draws the glTF scene as a small centre ellipsoid with a
+  crosshair along the patch diagonals as lines instead (`--gltf-cross-arm`, default
+  0.35 of the way to each corner). New `trimodal` extra (dependencies to be added).
 
 ## [0.2.1] - 2026-08-16
 

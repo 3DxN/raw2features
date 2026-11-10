@@ -30,14 +30,21 @@ def cluster_store(
     source: str | None = None,
     labels_overwrite: bool = False,
     gltf: bool = True,
+    gltf_glyph: str = "quad",
+    gltf_cross_arm: float | None = None,
 ) -> list[dict]:
     """Cluster each model's locations; return one summary per model.
 
     ``clusterer`` is a registered ``raw2features.clusterers`` name (constructed with
     ``clusterer_model``, ``None`` = its default model file) or an instance.
+    ``gltf_glyph`` is the glTF primitive per location (``gltf.GLYPHS``) and
+    ``gltf_cross_arm`` the ``marker`` crosshair arm (``None`` = ``gltf.CROSS_ARM``).
     """
-    from .gltf import write_glb
+    from .gltf import CROSS_ARM, check_glyph, write_glb
 
+    cross_arm = CROSS_ARM if gltf_cross_arm is None else gltf_cross_arm
+    if gltf:
+        check_glyph(gltf_glyph, cross_arm)  # before clustering or writing anything
     store = os.path.normpath(store)
     out_dir = out_dir or os.path.dirname(os.path.abspath(store))
     os.makedirs(out_dir, exist_ok=True)
@@ -106,6 +113,8 @@ def cluster_store(
                 f"{stem}.glb",
                 loc.feature_ids,
                 loc.footprints,
+                glyph=gltf_glyph,
+                cross_arm=cross_arm,
                 extras={
                     "scale_um": loc.scale_um,
                     "embedding_sha256": loc.sha256,

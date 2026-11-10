@@ -659,7 +659,7 @@ Inline (`--emit-thumbnail`) also records the thumbnail metadata in the store's
 ```bash
 raw2features cluster out/slide.embeddings.zarr [-m uni2_h] [--clusterer trimodal] \
     [--clusterer-model model.pt] [--clusterer-input NAME=PATH ...] \
-    [--write-labels] [--no-gltf] [--seed 0]
+    [--write-labels] [--no-gltf] [--gltf-glyph quad|marker] [--seed 0]
 ```
 
 Assigns every embedded location (all grids, i.e. all z planes) of each model one
@@ -684,12 +684,21 @@ planned; see `clustering/footprint.py`). Per model it writes:
   version, model sha256/path, placeholder flag, inputs), and both models' sha256
   (`embedding_model.sha256` is the pinned `weights_sha256`, or the output fingerprint
   for models without one - see `sha256_kind`).
-- `<slide>.<model>.clusters.glb` - binary glTF scene with one quad mesh per location;
+- `<slide>.<model>.clusters.glb` - binary glTF scene with one mesh per location;
   mesh *i*, node *i* and their `name` / `extras.feature_id` are the *i*-th feature ID.
   Node `translation` is the footprint centre `(x, y, z)` in level-0 voxels (voxel
-  centres at integer indices, so a quad spans `x0 - 0.5 .. x0 + side - 0.5`); the
-  quad lies in the z plane with edges along x/y and a double-sided material. Colour
-  by joining the JSON `clusters` on feature ID.
+  centres at integer indices, so a quad spans `x0 - 0.5 .. x0 + side - 0.5`).
+  `--gltf-glyph` picks what is drawn there: `quad` (default) is the footprint itself,
+  in the z plane with edges along x/y and a double-sided material; `marker` is a
+  small ellipsoid at the centre (semi-axes 0.08 x the patch side, the same in x, y
+  and z voxels) plus a crosshair along the two footprint diagonals, as glTF lines.
+  `--gltf-cross-arm` sets how far each arm reaches, as a fraction of the way from the
+  centre to its corner (default 0.35; 1 draws the full diagonals, which join up with
+  their neighbours' into a lattice). Lines are one pixel wide in most viewers and
+  some viewers ignore them. Each glyph is one node and one mesh, both named by
+  feature ID; colour by joining the JSON `clusters` on it. All meshes share one
+  material, so to colour glyphs individually assign each its own material - changing
+  the shared one recolours all of them.
 - `--write-labels` - an NGFF label image in the **source** OME-Zarr at
   `labels/clusters_<last 8 of embedding sha>_<last 8 of clustering model sha>/` (the
   `labels` listing is appended to), mirroring the image's pyramid, chunking, transforms

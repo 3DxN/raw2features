@@ -6,6 +6,7 @@ import hashlib
 import json
 import struct
 import warnings
+from collections import Counter
 
 import numpy as np
 import pytest
@@ -408,6 +409,108 @@ def test_gltf_has_one_named_mesh_per_location(embedded, tmp_path):
     )
 
 
+def _accessor(path: str, doc: dict, index: int) -> np.ndarray:
+    """An accessor's data from the .glb BIN chunk (tightly packed views)."""
+    data = open(path, "rb").read()
+    js_len = struct.unpack_from("<I", data, 12)[0]
+    binary = data[20 + js_len + 8 :]
+    acc = doc["accessors"][index]
+    view = doc["bufferViews"][acc["bufferView"]]
+    dtype = {5126: np.float32, 5123: np.uint16}[acc["componentType"]]
+    width = {"SCALAR": 1, "VEC3": 3}[acc["type"]]
+    raw = binary[view["byteOffset"] : view["byteOffset"] + view["byteLength"]]
+    return np.frombuffer(raw, dtype=dtype).reshape(acc["count"], width)
+
+
+def test_gltf_marker_glyph_is_centre_ellipsoid_and_diagonal_lines(embedded, tmp_path):
+    _source, store = embedded
+    (summary,) = cluster_store(
+        store, out_dir=str(tmp_path / "c"), clusterer="placeholder", gltf_glyph="marker"
+    )
+    record = _load(summary)
+    path = summary["gltf"]
+    doc = _read_glb(path)
+    ids = record["feature_ids"]
+    assert [m["name"] for m in doc["meshes"]] == ids
+    (side,) = {f["size_zyx"][1] for f in record["footprints"].values()}
+    for node in doc["nodes"]:  # translations are still the footprint centres
+        z, y0, x0 = record["footprints"][node["name"]]["origin_zyx"]
+        assert node["translation"] == [x0 + (side - 1) / 2, y0 + (side - 1) / 2, z]
+
+    # One shared geometry: a closed ellipsoid (triangles) and two diagonals (lines).
+    (prims,) = {json.dumps(m["primitives"]) for m in doc["meshes"]}
+    sphere, lines = json.loads(prims)
+    assert (sphere["mode"], lines["mode"]) == (4, 1)
+    assert "NORMAL" not in lines["attributes"]
+    r = 0.08 * side
+    verts = _accessor(path, doc, sphere["attributes"]["POSITION"])
+    np.testing.assert_allclose(np.linalg.norm(verts, axis=1), r, rtol=1e-5)
+    faces = _accessor(path, doc, sphere["indices"]).reshape(-1, 3)
+    a, b, c = (verts[faces[:, k]] for k in range(3))
+    outward = np.einsum("ij,ij->i", np.cross(b - a, c - a), a + b + c)
+    assert (outward > 0).all()  # counter-clockwise seen from outside, none degenerate
+    uses = Counter(
+        tuple(sorted(e))
+        for f in faces.tolist()
+        for e in zip(f, f[1:] + f[:1], strict=True)
+    )
+    assert set(uses.values()) == {2}  # closed: every edge shared by two faces
+    normals = _accessor(path, doc, sphere["attributes"]["NORMAL"])
+    np.testing.assert_allclose(normals, verts / r, atol=1e-5)
+
+    # Diagonals through the centre, by default 35% of the way to each corner.
+    h = 0.35 * side / 2
+    np.testing.assert_allclose(_cross_segments(path, doc, lines), [
+        (-h, -h, 0.0, h, h, 0.0),
+        (h, -h, 0.0, -h, h, 0.0),
+    ], rtol=1e-6)  # fmt: skip
+    assert doc["materials"] == [{"name": "marker"}]
+    assert "ellipsoid" in doc["asset"]["extras"]["geometry"]
+
+
+def _cross_segments(path: str, doc: dict, lines: dict) -> list:
+    """The crosshair's line segments as sorted ``(x0, y0, z0, x1, y1, z1)``."""
+    corners = _accessor(path, doc, lines["attributes"]["POSITION"])
+    segments = _accessor(path, doc, lines["indices"]).reshape(-1, 2)
+    return sorted(map(tuple, corners[segments].reshape(-1, 6).tolist()))
+
+
+@pytest.mark.parametrize("glyph", ["quad", "marker"])
+def test_each_glyph_is_one_mesh_addressable_by_feature_id(embedded, tmp_path, glyph):
+    # A viewer colours glyph i individually through node i / mesh i, found by feature
+    # ID: every primitive of the glyph is in its mesh, and no other node uses it.
+    _source, store = embedded
+    (summary,) = cluster_store(
+        store, out_dir=str(tmp_path / "c"), clusterer="placeholder", gltf_glyph=glyph
+    )
+    ids = _load(summary)["feature_ids"]
+    doc = _read_glb(summary["gltf"])
+    assert len(set(ids)) == len(ids)
+    assert doc["scenes"][0]["nodes"] == list(range(len(ids)))
+    for i, (fid, node, mesh) in enumerate(
+        zip(ids, doc["nodes"], doc["meshes"], strict=True)
+    ):
+        assert node["mesh"] == i
+        assert node["name"] == mesh["name"] == fid
+        assert node["extras"] == mesh["extras"] == {"feature_id": fid}
+        assert "children" not in node
+        assert len(mesh["primitives"]) == (1 if glyph == "quad" else 2)
+
+
+def test_bad_gltf_options_are_refused_before_clustering(embedded, tmp_path):
+    _source, store = embedded
+    for kw, match in (
+        ({"gltf_glyph": "x"}, "glyph"),
+        ({"gltf_glyph": "marker", "gltf_cross_arm": 0.0}, "cross arm"),
+        ({"gltf_glyph": "marker", "gltf_cross_arm": 1.5}, "cross arm"),
+    ):
+        with pytest.raises(ValueError, match=match):
+            cluster_store(
+                store, out_dir=str(tmp_path / "c"), clusterer="placeholder", **kw
+            )
+    assert not list((tmp_path / "c").glob("*.json"))
+
+
 def test_cli_cluster(embedded, tmp_path):
     from typer.testing import CliRunner
 
@@ -435,6 +538,28 @@ def test_cli_cluster(embedded, tmp_path):
     assert record["clustering_model"]["plugin"] == "placeholder"
     assert record["clustering_model"]["inputs"] == {"rna": "/data/rna.h5ad"}
     assert (tmp_path / "c" / "s3d.mock.clusters.glb").exists()
+    marker = CliRunner().invoke(
+        app,
+        ["cluster", store, "--out-dir", str(tmp_path / "m"), "--clusterer",
+         "placeholder", "--gltf-glyph", "marker", "--gltf-cross-arm", "1"],
+    )  # fmt: skip
+    assert marker.exit_code == 0, marker.output
+    path = str(tmp_path / "m" / "s3d.mock.clusters.glb")
+    doc = _read_glb(path)
+    assert doc["materials"] == [{"name": "marker"}]
+    side = record["footprints"][record["feature_ids"][0]]["size_zyx"][1]
+    h = side / 2  # arm 1: the full diagonals, corner to corner
+    lines = doc["meshes"][0]["primitives"][1]
+    assert _cross_segments(path, doc, lines) == [
+        (-h, -h, 0.0, h, h, 0.0),
+        (h, -h, 0.0, -h, h, 0.0),
+    ]
+    unknown = CliRunner().invoke(app, ["cluster", store, "--gltf-glyph", "x"])
+    assert unknown.exit_code == 1 and "glyph" in unknown.output
+    no_arm = CliRunner().invoke(
+        app, ["cluster", store, "--gltf-glyph", "marker", "--gltf-cross-arm", "0"]
+    )
+    assert no_arm.exit_code == 1 and "cross arm" in no_arm.output
     bad = CliRunner().invoke(app, ["cluster", store, "--clusterer-input", "rna"])
     assert bad.exit_code != 0
 

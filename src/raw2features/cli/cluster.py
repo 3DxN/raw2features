@@ -51,7 +51,20 @@ def cluster(
         False, "--labels-overwrite", help="Replace an existing label of that name."
     ),
     gltf: bool = typer.Option(
-        True, "--gltf/--no-gltf", help="Write a .glb scene (one quad per location)."
+        True, "--gltf/--no-gltf", help="Write a .glb scene (one glyph per location)."
+    ),
+    gltf_glyph: str = typer.Option(
+        "quad",
+        "--gltf-glyph",
+        help="glTF primitive per location: 'quad' (the patch footprint) or 'marker' "
+        "(a small ellipsoid at the patch centre with the patch diagonals as lines).",
+    ),
+    gltf_cross_arm: float | None = typer.Option(
+        None,
+        "--gltf-cross-arm",
+        help="Crosshair arm of --gltf-glyph marker, as a fraction (0, 1] of the way "
+        "from the patch centre to its corner; 1 draws the full diagonals. "
+        "Default: 0.35.",
     ),
 ) -> None:
     """Assign each embedded location a cluster; write JSON, glTF and labels."""
@@ -78,6 +91,8 @@ def cluster(
             source=source,
             labels_overwrite=labels_overwrite,
             gltf=gltf,
+            gltf_glyph=gltf_glyph,
+            gltf_cross_arm=gltf_cross_arm,
         )
     except (
         FileExistsError,
