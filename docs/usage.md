@@ -708,10 +708,14 @@ planned; see `clustering/footprint.py`). Per model it writes:
   viewers that key meshes by integer label (`cluster` comes first, so a viewer that
   defaults to the first property colours by it).
 - `--write-meshes` - copies the scene and its properties into the **source** OME-Zarr
-  as `meshes/<name>.glb` and `meshes/<name>.properties.json` and lists them in the
-  attributes of the `meshes` zarr group, `{"meshes": [{"name", "path", "properties"}]}`
-  (paths relative to `meshes/`; other entries are kept). This is a viewer convention,
-  not part of NGFF. A name already listed, or whose files exist, stops the run before
+  as `meshes/<name>.glb` and `meshes/<name>.properties.json`, writes the glyphs'
+  embedding vectors to the zarr array `meshes/<name>.embeddings.zarr`, and lists all
+  three in the attributes of the `meshes` zarr group,
+  `{"meshes": [{"name", "path", "properties", "embeddings": {"path", "model",
+  "sha256", "sha256_kind"}}]}` (paths relative to `meshes/`; other entries are kept).
+  The array is `(glyphs, dim)` float32, uncompressed and chunked by rows, so row
+  `label-value - 1` is one glyph's vector; `sha256` identifies the embedding model as
+  in the clusters JSON. This is a viewer convention, not part of NGFF. A name already listed, or whose files exist, stops the run before
   anything is written unless `--overwrite` is given.
 - `--write-labels` - an NGFF label image in the **source** OME-Zarr at
   `labels/<name>/` (the `labels` listing is appended to), mirroring the image's pyramid, chunking, transforms

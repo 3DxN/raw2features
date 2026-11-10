@@ -448,8 +448,36 @@ def test_write_meshes_lists_scene_and_properties_in_source(embedded, tmp_path):
     listing = dict(zarr.open_group(meshes, mode="r", use_consolidated=False).attrs)
     assert listing["meshes"] == [
         {"name": "nuclei", "path": "nuclei.glb"},
-        {"name": name, "path": f"{name}.glb", "properties": f"{name}.properties.json"},
+        {
+            "name": name,
+            "path": f"{name}.glb",
+            "properties": f"{name}.properties.json",
+            "embeddings": {
+                "path": f"{name}.embeddings.zarr",
+                "model": "mock",
+                "sha256": record["embedding_model"]["sha256"],
+                "sha256_kind": record["embedding_model"]["sha256_kind"],
+            },
+        },
     ]
+    # Row label-value - 1 is that glyph's vector, as stored under its feature ID.
+    assert record["mesh_index"]["embeddings"] == f"{meshes}/{name}.embeddings.zarr"
+    vectors = zarr.open_array(f"{meshes}/{name}.embeddings.zarr", mode="r")
+    assert vectors.dtype == np.float32 and vectors.compressors == ()
+    assert (
+        dict(vectors.attrs)["raw2features"]["sha256"]
+        == record["embedding_model"]["sha256"]
+    )
+    from raw2features.core.store import GRIDS, open_root
+
+    root = open_root(store)
+    expected = np.stack(
+        [
+            np.asarray(root[GRIDS][key]["features"]["mock"][int(row)])
+            for key, row in (fid.rsplit("/", 1) for fid in record["feature_ids"])
+        ]
+    ).astype(np.float32)
+    np.testing.assert_array_equal(np.asarray(vectors), expected)
     with open(f"{meshes}/{name}.glb", "rb") as a, open(summary["gltf"], "rb") as b:
         assert a.read() == b.read()
     with open(f"{meshes}/{name}.properties.json", encoding="utf-8") as fh:

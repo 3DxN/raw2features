@@ -32,7 +32,8 @@ Notable changes to raw2features, newest first. This project follows
   0.35 of the way to each corner). Each glyph also carries an integer
   `extras["label-value"]`, and a `<slide>.<model>.clusters.properties.json` maps it to
   cluster and feature ID; `--write-meshes` copies both into the source's `meshes/`
-  and lists them in `meshes/zarr.json`. Label image and mesh names include a digest
+  with a per-glyph embedding array (row `label-value - 1`) and lists them, with the
+  embedding model's sha256, in `meshes/zarr.json`. Label image and mesh names include a digest
   of the run's grids, so runs with other patches no longer share one name;
   `--overwrite` (alias `--labels-overwrite`) replaces either. Label listings are read
   from disk rather than stale consolidated metadata. New `trimodal` extra

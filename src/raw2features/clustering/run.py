@@ -151,7 +151,13 @@ def cluster_store(
                 )
             if write_meshes:
                 mesh_path = write_mesh_index(
-                    source_path, name, glb_path, properties_path, overwrite=overwrite
+                    source_path,
+                    name,
+                    glb_path,
+                    properties_path,
+                    features,
+                    identity["embedding_model"],
+                    overwrite=overwrite,
                 )
 
         record = {
@@ -171,7 +177,17 @@ def cluster_store(
             "properties": (
                 os.path.basename(properties_path) if properties_path else None
             ),
-            "mesh_index": ({"name": name, "path": mesh_path} if mesh_path else None),
+            "mesh_index": (
+                {
+                    "name": name,
+                    "path": mesh_path,
+                    "embeddings": os.path.join(
+                        os.path.dirname(mesh_path), f"{name}.embeddings.zarr"
+                    ),
+                }
+                if mesh_path
+                else None
+            ),
             # Order of feature_ids == glTF mesh/node order.
             "feature_ids": loc.feature_ids,
             "clusters": dict(
