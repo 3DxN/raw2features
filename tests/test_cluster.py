@@ -441,7 +441,7 @@ def test_gltf_marker_glyph_is_centre_ellipsoid_and_diagonal_lines(embedded, tmp_
     (prims,) = {json.dumps(m["primitives"]) for m in doc["meshes"]}
     sphere, cross = json.loads(prims)
     assert (sphere["mode"], cross["mode"]) == (4, 4)
-    r = 0.04 * side
+    r = 0.02 * side
     verts = _accessor(path, doc, sphere["attributes"]["POSITION"])
     np.testing.assert_allclose(np.linalg.norm(verts, axis=1), r, rtol=1e-5)
     faces = _accessor(path, doc, sphere["indices"]).reshape(-1, 3)
@@ -464,7 +464,7 @@ def test_gltf_marker_glyph_is_centre_ellipsoid_and_diagonal_lines(embedded, tmp_
 
 
 def _check_cross(path: str, doc: dict, cross: dict, side: float, arm: float) -> None:
-    """Two closed, outward-wound triangular prisms of circumradius 0.01 x ``side``,
+    """Two closed, outward-wound triangular prisms of circumradius 0.005 x ``side``,
     along the footprint diagonals, ``arm`` of the way from the centre to a corner."""
     verts = _accessor(path, doc, cross["attributes"]["POSITION"]).astype(np.float64)
     normals = _accessor(path, doc, cross["attributes"]["NORMAL"])
@@ -485,7 +485,7 @@ def _check_cross(path: str, doc: dict, cross: dict, side: float, arm: float) -> 
         t = part @ d
         np.testing.assert_allclose(np.abs(t), arm * side / np.sqrt(2.0), rtol=1e-5)
         dist = np.linalg.norm(part - t[:, None] * d, axis=1)
-        np.testing.assert_allclose(dist, 0.01 * side, rtol=1e-4)
+        np.testing.assert_allclose(dist, 0.005 * side, rtol=1e-4)
         corners = {tuple(np.round(v, 3)) for v in part.tolist()}
         assert len(corners) == 6  # closed: every face corner is a prism corner
         edges = Counter(

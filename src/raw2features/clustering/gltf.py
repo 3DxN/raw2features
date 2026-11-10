@@ -42,8 +42,8 @@ _ARRAY_BUFFER, _ELEMENT_ARRAY_BUFFER = 34962, 34963
 _TRIANGLES = 4
 
 GLYPHS = ("quad", "marker")
-MARKER_RADIUS = 0.04  # marker ellipsoid semi-axis, as a fraction of the patch side
-CROSS_RADIUS = 0.01  # crosshair prism circumradius, as a fraction of the patch side
+MARKER_RADIUS = 0.02  # marker ellipsoid semi-axis, as a fraction of the patch side
+CROSS_RADIUS = 0.005  # crosshair prism circumradius, as a fraction of the patch side
 CROSS_ARM = 0.35  # marker crosshair arm, as a fraction of the centre-corner distance
 _RINGS, _SEGMENTS = 8, 12  # ellipsoid tessellation (latitude, longitude)
 

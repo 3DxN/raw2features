@@ -690,9 +690,9 @@ planned; see `clustering/footprint.py`). Per model it writes:
   centres at integer indices, so a quad spans `x0 - 0.5 .. x0 + side - 0.5`).
   `--gltf-glyph` picks what is drawn there: `quad` (default) is the footprint itself,
   in the z plane with edges along x/y and a double-sided material; `marker` is a
-  small ellipsoid at the centre (semi-axes 0.04 x the patch side, the same in x, y
+  small ellipsoid at the centre (semi-axes 0.02 x the patch side, the same in x, y
   and z voxels) plus a crosshair along the two footprint diagonals, each a thin
-  closed prism with a triangular cross-section (circumradius 0.01 x the patch side)
+  closed prism with a triangular cross-section (circumradius 0.005 x the patch side)
   rather than glTF lines, which many viewers do not display. `--gltf-cross-arm` sets
   how far each arm reaches, as a fraction of the way from the centre to its corner
   (default 0.35; 1 draws the full diagonals, which join up with their neighbours'
